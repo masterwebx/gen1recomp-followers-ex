@@ -1,4 +1,4 @@
-﻿-- Followers EX: control modes / pack / leaders + wilds follower sheets.
+-- Followers EX: control modes / pack / leaders + wilds follower sheets.
 -- Depends on PokePCFollowers_VoxelMerge (Antigravity sprite pack).
 return function(mod)
   local Game = require("src.core.Game")
