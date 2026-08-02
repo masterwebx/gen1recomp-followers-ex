@@ -13,13 +13,38 @@ return function(mod)
   local WILDS_ID = "overworld_wild_spawns"
   local FOLLOWERS_ID = "PokePCFollowers_VoxelMerge"
 
+  -- Local lib loader (same pattern as Hunt Mode).
+  local libModules = {}
+  local function libRequire(name)
+    local hit = libModules[name]
+    if hit ~= nil then return hit end
+    local source = mod:read("lib/" .. name .. ".lua")
+    if not source then
+      error("FOLLOWERS_EX: missing lib/" .. name .. ".lua", 0)
+    end
+    local chunk, err = load(source, "@" .. mod.path .. "/lib/" .. name .. ".lua")
+    if not chunk then
+      error("FOLLOWERS_EX: " .. name .. " compile: " .. tostring(err), 0)
+    end
+    hit = chunk()
+    libModules[name] = hit
+    return hit
+  end
+
+  local ControlEngine = libRequire("ControlEngine")
+  local WildsExtras = libRequire("WildsExtras")
+
   local function poke()
     return mod:find(FOLLOWERS_ID)
   end
 
   local function exports()
     local p = poke()
-    return p and p.exports or {}
+    local ex = p and p.exports or {}
+    if type(ex.setFollowerCount) == "function" then return ex end
+    -- ControlEngine publishes onto FOLLOWERS_EX.exports when PokePC is a stub.
+    if type(mod.exports.setFollowerCount) == "function" then return mod.exports end
+    return ex
   end
 
   mod.options:define({
@@ -64,7 +89,21 @@ return function(mod)
       type = "toggle",
       label = "WILDS SPRITES",
       default = true,
-      help = "Use PokÃ©PC follower walk sheets for Wilds of Kanto overworld spawns.",
+      help = "Use PokéPC follower walk sheets for Wilds of Kanto overworld spawns.",
+    },
+    {
+      key = "wilds_town_spawns",
+      type = "toggle",
+      label = "TOWN SPAWNS",
+      default = true,
+      help = "Allow Wilds of Kanto spawns in towns (borrow route grass / default).",
+    },
+    {
+      key = "wilds_require_reachable",
+      type = "toggle",
+      label = "REACHABLE ONLY",
+      default = true,
+      help = "Only spawn wilds on tiles the player can walk/surf/ledge to.",
     },
   })
 
@@ -79,29 +118,58 @@ return function(mod)
   local function optChoice(key, default)
     if optCache[key] ~= nil then return optCache[key] end
     local ok, got = pcall(mod.options.get, mod.options, key)
-    optCache[key] = (ok and got ~= nil) and got or default
+    -- Booleans are never valid choice values (corrupted follower_count etc.).
+    if ok and got ~= nil and type(got) ~= "boolean" then
+      optCache[key] = got
+    else
+      optCache[key] = default
+    end
     return optCache[key]
   end
 
+  -- Engine mod.options has define/get only — never call options:set.
   local function persistOpt(key, value, game)
     optCache[key] = value
-    pcall(function() mod.options:set(key, value) end)
-    if game and game.save then
-      game.save.options = game.save.options or {}
-      game.save.options.modOptions = game.save.options.modOptions or {}
-      game.save.options.modOptions[mod.id] =
-        game.save.options.modOptions[mod.id] or {}
-      game.save.options.modOptions[mod.id][key] = value
+    local g = game or Game
+    if g and g.save then
+      g.save.options = g.save.options or {}
+      g.save.options.modOptions = g.save.options.modOptions or {}
+      g.save.options.modOptions[mod.id] =
+        g.save.options.modOptions[mod.id] or {}
+      g.save.options.modOptions[mod.id][key] = value
     end
-    if game and game.mods then
-      game.mods.modOptions = game.mods.modOptions or {}
-      game.mods.modOptions[mod.id] = game.mods.modOptions[mod.id] or {}
-      game.mods.modOptions[mod.id][key] = value
+    if g and g.mods then
+      g.mods.modOptions = g.mods.modOptions or {}
+      g.mods.modOptions[mod.id] = g.mods.modOptions[mod.id] or {}
+      g.mods.modOptions[mod.id][key] = value
     end
-    if game and game.writeOptions then pcall(game.writeOptions, game) end
+    if g and g.writeOptions then pcall(g.writeOptions, g) end
   end
 
   local applyingUi = false
+
+  -- Never use bare `and` for counts: missing export yields false, not nil.
+  local function liveFollowerCount(game)
+    local ex = exports()
+    if type(ex.followerCount) == "function" then
+      local n = ex.followerCount(game or Game)
+      if type(n) == "number" then
+        return math.max(0, math.min(6, math.floor(n)))
+      end
+    end
+    local raw = optChoice("follower_count", 1)
+    if raw == false or raw == true then raw = nil end
+    return math.max(0, math.min(6, tonumber(raw) or 1))
+  end
+
+  local function sanitizeFollowerCountOpt(game)
+    local ok, got = pcall(mod.options.get, mod.options, "follower_count")
+    if ok and type(got) == "boolean" then
+      persistOpt("follower_count", 1, game or Game)
+      return true
+    end
+    return false
+  end
 
   local function liveMode(game)
     local ex = exports()
@@ -111,7 +179,16 @@ return function(mod)
     end
     local saved = game and game.save and game.save.pokepcControlMode
     if type(saved) == "string" and saved ~= "" then return saved end
-    return tostring(optChoice("control_mode", "follow"))
+    local mode = optChoice("control_mode", "follow")
+    if type(mode) ~= "string" or mode == "" then mode = "follow" end
+    return mode
+  end
+
+  local function pokeReady()
+    local ex = exports()
+    return type(ex.setFollowerCount) == "function"
+      and type(ex.setControlMode) == "function"
+      and type(ex.syncAll) == "function"
   end
 
   -- Mirror trainer_follows from the real engine mode (party / OPTIONS).
@@ -132,8 +209,8 @@ return function(mod)
     elseif trainerFollows then
       mode = "lead_trainer"
     else
-      -- Preserve pack if already packing; otherwise solo BE MON.
-      mode = (liveMode(g) == "pack") and "pack" or "pokemon"
+      -- Pokemon control, no trainer NPC: pack trails if FOLLOWERS > 0, else solo.
+      mode = (liveFollowerCount(g) > 0) and "pack" or "pokemon"
     end
     applyingUi = true
     persistOpt("trainer_follows", trainerFollows and true or false, g)
@@ -167,22 +244,30 @@ return function(mod)
       applyControlUi(g, who, follows)
       return
     end
+    if key == "follower_count" then
+      value = math.max(0, math.min(6, math.floor(tonumber(value) or 1)))
+    end
     persistOpt(key, value, g)
     if key == "follower_count" and type(ex.setFollowerCount) == "function" then
       pcall(ex.setFollowerCount, g, value)
     end
     pcall(function()
-      if ex.syncAll then ex.syncAll(g, g and g.overworld) end
+      if type(ex.syncAll) == "function" then ex.syncAll(g, g and g.overworld) end
     end)
   end
 
   mod.events:on("mod.options_changed", function(payload)
     if not (payload and payload.mod == mod.id) then return end
-    optCache[payload.key] = payload.value
+    local val = payload.value
+    if payload.key == "follower_count" and type(val) == "boolean" then
+      val = 1
+      persistOpt("follower_count", val, Game)
+    end
+    optCache[payload.key] = val
     if applyingUi then return end
     local ex = exports()
     if payload.key == "trainer_follows" then
-      local follows = payload.value and true or false
+      local follows = val and true or false
       local mode = liveMode(Game)
       if follows and mode ~= "lead_trainer" then
         applyControlUi(Game, "pokemon", true)
@@ -192,30 +277,88 @@ return function(mod)
       return
     end
     if payload.key == "control_mode" then
-      -- Party / setControlMode writes full engine modes; just mirror TRAINER FOLLOWS.
-      if payload.value == "lead_trainer" or payload.value == "pack"
-          or payload.value == "pokemon" or payload.value == "follow" then
-        syncTrainerFollowsFromMode(payload.value, Game)
-        return
-      end
-      if payload.value == "trainer" then
+      -- OPTIONS choices are follow/pokemon; apply to save + visuals.
+      -- lead_trainer/pack are written by party/setControlMode already.
+      if val == "trainer" or val == "follow" then
         applyControlUi(Game, "trainer", false)
+      elseif val == "pokemon" then
+        local follows = liveMode(Game) == "lead_trainer"
+          or optBool("trainer_follows", false)
+        applyControlUi(Game, "pokemon", follows)
+      elseif val == "lead_trainer" or val == "pack" then
+        syncTrainerFollowsFromMode(val, Game)
+        if type(ex.setControlMode) == "function" then
+          pcall(ex.setControlMode, Game, val)
+        end
+        pcall(function()
+          if type(ex.syncAll) == "function" then
+            ex.syncAll(Game, Game and Game.overworld)
+          end
+        end)
       end
       return
     end
-    if payload.key == "follower_count" and type(ex.setFollowerCount) == "function" then
-      ex.setFollowerCount(Game, payload.value)
+    if payload.key == "follower_count" then
+      local n = math.max(0, math.min(6, math.floor(tonumber(val) or 1)))
+      if type(ex.setFollowerCount) == "function" then
+        pcall(ex.setFollowerCount, Game, n)
+      elseif Game and Game.save then
+        Game.save.pokepcFollowerCount = n
+      end
     end
     pcall(function()
-      if ex.syncAll then ex.syncAll(Game, Game and Game.overworld) end
+      if type(ex.syncAll) == "function" then
+        ex.syncAll(Game, Game and Game.overworld)
+      end
     end)
   end)
 
-  -- Keep OPTIONS rows in sync when party menu changes modes.
-  mod.events:once("mods.loaded", function()
+  local controlEngineInstalled = false
+  local wildsExtrasInstalled = false
+
+  local function ensureControlEngine()
+    if pokeReady() then return true end
     local p = poke()
-    local ex = p and p.exports
-    if not (ex and type(ex.setControlMode) == "function") then return end
+    if not p then
+      mod.log:warn("PokePCFollowers_VoxelMerge missing — sprites/control unavailable")
+      return false
+    end
+    if mod.exports._followersExControlEngine or (p.exports and p.exports._followersExControlEngine) then
+      controlEngineInstalled = true
+      return pokeReady()
+    end
+    local ok, err = pcall(ControlEngine, mod, p)
+    if not ok then
+      mod.log:error("ControlEngine failed: " .. tostring(err))
+      return false
+    end
+    controlEngineInstalled = true
+    mod.log:info("ControlEngine installed over PokePC stub (sprite assets from pack)")
+    return pokeReady()
+  end
+
+  local function ensureWildsExtras()
+    if wildsExtrasInstalled then return true end
+    local wilds = mod:find(WILDS_ID)
+    if not wilds then return false end
+    local api = WildsExtras
+    if type(api) == "function" then api = api(mod) end
+    if type(api) ~= "table" or type(api.install) ~= "function" then
+      mod.log:warn("WildsExtras load failed")
+      return false
+    end
+    local ok, result = pcall(api.install, wilds)
+    if not ok then
+      mod.log:error("WildsExtras install failed: " .. tostring(result))
+      return false
+    end
+    wildsExtrasInstalled = result and true or false
+    return wildsExtrasInstalled
+  end
+
+  local function wrapControlModeSync()
+    local ex = exports()
+    if type(ex.setControlMode) ~= "function" then return end
     if ex._followersExModeWrapped then return end
     local orig = ex.setControlMode
     ex.setControlMode = function(game, mode)
@@ -226,6 +369,54 @@ return function(mod)
       end
     end
     ex._followersExModeWrapped = true
+  end
+
+  local function warnMissingPoke(game)
+    if pokeReady() then return end
+    mod.log:warn(
+      "PokePCFollowers_VoxelMerge missing — install the Voxel Merge sprite pack")
+    if game and game.stack and not game._followersExWarnedStub then
+      game._followersExWarnedStub = true
+      pcall(function()
+        game.stack:push(TextBox.new(game, Strings(
+          "FOLLOWERS EX needs\nPokéPC Followers\v(Voxel Merge).\fInstall that pack\nand restart.")))
+      end)
+    end
+  end
+
+  -- ControlEngine MUST install during entry (before content freeze).
+  -- mods.loaded fires AFTER registries freeze — sprites:patch would abort install.
+  sanitizeFollowerCountOpt(Game)
+  if not ensureControlEngine() then
+    mod.log:error("ControlEngine failed to install during load")
+  end
+  wrapControlModeSync()
+
+  -- WildsExtras only wraps runtime methods; safe after freeze.
+  mod.events:once("mods.loaded", function()
+    sanitizeFollowerCountOpt(Game)
+    ensureControlEngine() -- no-op if already ready; safe if sprites patch pcall'd
+    ensureWildsExtras()
+    wrapControlModeSync()
+    if not pokeReady() then warnMissingPoke(Game) end
+  end)
+
+  mod.events:on("game.ready", function()
+    sanitizeFollowerCountOpt(Game)
+    ensureControlEngine()
+    ensureWildsExtras()
+    wrapControlModeSync()
+    warnMissingPoke(Game)
+    local ex = exports()
+    -- Unstick saves that had pokepcFollowerCount=0 while OPTIONS said 6.
+    if type(ex.alignSaveFromOptions) == "function" then
+      pcall(ex.alignSaveFromOptions, Game)
+    elseif type(ex.setFollowerCount) == "function" then
+      pcall(ex.setFollowerCount, Game, liveFollowerCount(Game))
+    end
+    if type(ex.syncAll) == "function" then
+      pcall(ex.syncAll, Game, Game and Game.overworld)
+    end
   end)
 
   local function sync(game)
@@ -382,6 +573,7 @@ return function(mod)
     if not items or not mon or not game or (ctx and ctx.battle) then
       return items
     end
+    if not pokeReady() then ensureControlEngine() end
     local ex = exports()
     if type(ex.getLeaderMon) ~= "function" then return items end
     if hasLabel(items, "BE MON") or hasLabel(items, "PACK") then
@@ -414,8 +606,8 @@ return function(mod)
     local mode = type(ex.controlMode) == "function" and ex.controlMode(game) or "follow"
 
     local function packLabel()
-      local n = type(ex.followerCount) == "function" and ex.followerCount(game) or 1
-      local m = type(ex.controlMode) == "function" and ex.controlMode(game) or mode
+      local n = liveFollowerCount(game)
+      local m = liveMode(game)
       local mark = (m == "pack") and "*" or ""
       return Strings("PACK %d%s", n, mark)
     end
@@ -483,14 +675,13 @@ return function(mod)
           label = packLabel(),
           pokepcPackAdjust = true,
           onAdjust = function(g, delta, menu)
-            local n = (type(ex.followerCount) == "function"
-              and ex.followerCount(g) or 1) + delta
-            if ex.setFollowerCount then ex.setFollowerCount(g, n) end
-            local m = type(ex.controlMode) == "function" and ex.controlMode(g) or "follow"
+            local n = liveFollowerCount(g) + delta
+            if n < 0 then n = 0 elseif n > 6 then n = 6 end
+            setOpt("follower_count", n, g)
+            local m = liveMode(g)
             if m ~= "lead_trainer" and m ~= "follow" then
               if ex.setControlMode then
-                local nn = type(ex.followerCount) == "function" and ex.followerCount(g) or n
-                ex.setControlMode(g, nn > 0 and "pack" or "pokemon")
+                ex.setControlMode(g, liveFollowerCount(g) > 0 and "pack" or "pokemon")
               end
             end
             for _, it in ipairs(menu.subItems or {}) do
@@ -501,15 +692,14 @@ return function(mod)
             sync(g)
           end,
           onSelect = function()
-            if type(ex.followerCount) == "function" and ex.followerCount(game) < 1
-               and ex.setFollowerCount then
-              ex.setFollowerCount(game, 1)
+            if liveFollowerCount(game) < 1 then
+              setOpt("follower_count", 1, game)
             end
             if ex.setControlMode then ex.setControlMode(game, "pack") end
             sync(game)
             game.stack:push(TextBox.new(game,
-              Strings("POKÃ©MON leads!\n%d follow. â—€â–¶",
-                type(ex.followerCount) == "function" and ex.followerCount(game) or 1)))
+              Strings("POKéMON leads!\n%d follow. ◀▶",
+                liveFollowerCount(game))))
           end,
         })
       end
@@ -764,16 +954,10 @@ return function(mod)
       {
         label = "FOLLOWERS",
         value = function()
-          local ex = exports()
-          local n = type(ex.followerCount) == "function" and ex.followerCount(game)
-          if n == nil then n = tonumber(optChoice("follower_count", 1)) or 1 end
-          return tostring(n)
+          return tostring(liveFollowerCount(game))
         end,
         step = function(g)
-          local ex = exports()
-          local n = type(ex.followerCount) == "function" and ex.followerCount(g)
-          if n == nil then n = tonumber(optChoice("follower_count", 1)) or 1 end
-          n = (tonumber(n) or 1) + 1
+          local n = liveFollowerCount(g) + 1
           if n > 6 then n = 0 end
           setOpt("follower_count", n, g)
         end,
@@ -795,6 +979,43 @@ return function(mod)
         step = function(g)
           setOpt("wilds_follower_sprites",
             not optBool("wilds_follower_sprites", true), g)
+        end,
+      },
+      {
+        label = "TOWN SPAWNS",
+        value = function()
+          return optBool("wilds_town_spawns", true) and "ON" or "OFF"
+        end,
+        step = function(g)
+          local on = not optBool("wilds_town_spawns", true)
+          setOpt("wilds_town_spawns", on, g)
+          -- Re-init current map so the toggle applies without warping.
+          pcall(function()
+            local wilds = mod:find(WILDS_ID)
+            local logic = wilds and wilds.exports and wilds.exports.logic
+            local ow = g and g.overworld
+            if logic and ow and ow.map and type(logic.initializeForMap) == "function" then
+              logic:initializeForMap(ow.map.id, g)
+            end
+          end)
+        end,
+      },
+      {
+        label = "REACHABLE ONLY",
+        value = function()
+          return optBool("wilds_require_reachable", true) and "ON" or "OFF"
+        end,
+        step = function(g)
+          local on = not optBool("wilds_require_reachable", true)
+          setOpt("wilds_require_reachable", on, g)
+          pcall(function()
+            local wilds = mod:find(WILDS_ID)
+            local logic = wilds and wilds.exports and wilds.exports.logic
+            local ow = g and g.overworld
+            if logic and ow and ow.map and type(logic.initializeForMap) == "function" then
+              logic:initializeForMap(ow.map.id, g)
+            end
+          end)
         end,
       },
     }
@@ -878,7 +1099,11 @@ return function(mod)
     return items
   end)
 
-  mod.exports.version = "1.0.1"
-  mod.log:info("FOLLOWERS_EX 1.0.1")
+  mod.exports.version = "1.0.2"
+  mod.exports.liveFollowerCount = liveFollowerCount
+  mod.exports.pokeReady = pokeReady
+  mod.exports.ensureControlEngine = ensureControlEngine
+  mod.exports.ensureWildsExtras = ensureWildsExtras
+  mod.log:info("FOLLOWERS_EX 1.0.2 — control engine + wilds extras for public deps")
 end
 
