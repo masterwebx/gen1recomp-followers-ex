@@ -17,7 +17,7 @@ Optional: **Shiny Pokemon** for sparkles on shiny followers and wilds.
 
 ## OPTIONS
 
-**FOLLOWERS EX → OPEN** — CONTROL MODE, FOLLOWERS count, WILDS SPRITES.
+**FOLLOWERS EX → OPEN** — CONTROL MODE (TRAINER/POKEMON), TRAINER FOLLOWS, FOLLOWERS, SHOW IN MENU, WILDS SPRITES.
 
 ## Party (on the leader)
 

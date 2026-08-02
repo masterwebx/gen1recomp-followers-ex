@@ -29,12 +29,17 @@ return function(mod)
       label = "CONTROL MODE",
       default = "follow",
       choices = {
-        { "Trainer (pokemon follow)", "follow" },
-        { "Be the Pokemon", "pokemon" },
-        { "Pokemon leads, trainer follows", "lead_trainer" },
-        { "Pokemon leads, pokemon follow", "pack" },
+        { "Trainer", "follow" },
+        { "Pokemon", "pokemon" },
       },
       help = "Who you control. Leader via LEADER / BOX LEADER.",
+    },
+    {
+      key = "trainer_follows",
+      type = "toggle",
+      label = "TRAINER FOLLOWS",
+      default = false,
+      help = "When ON, you control a Pokemon and the trainer trails behind.",
     },
     {
       key = "follower_count",
@@ -46,6 +51,13 @@ return function(mod)
         { "4", 4 }, { "5", 5 }, { "6", 6 },
       },
       help = "How many party mons trail (excludes the controlled leader).",
+    },
+    {
+      key = "show_in_menu",
+      type = "toggle",
+      label = "SHOW IN MENU",
+      default = false,
+      help = "Add FOLLOWERS EX to the Start menu.",
     },
     {
       key = "wilds_follower_sprites",
@@ -71,7 +83,7 @@ return function(mod)
     return optCache[key]
   end
 
-  local function setOpt(key, value, game)
+  local function persistOpt(key, value, game)
     optCache[key] = value
     pcall(function() mod.options:set(key, value) end)
     if game and game.save then
@@ -87,11 +99,75 @@ return function(mod)
       game.mods.modOptions[mod.id][key] = value
     end
     if game and game.writeOptions then pcall(game.writeOptions, game) end
+  end
+
+  local applyingUi = false
+
+  local function liveMode(game)
+    local ex = exports()
+    if type(ex.controlMode) == "function" then
+      local m = ex.controlMode(game or Game)
+      if type(m) == "string" and m ~= "" then return m end
+    end
+    local saved = game and game.save and game.save.pokepcControlMode
+    if type(saved) == "string" and saved ~= "" then return saved end
+    return tostring(optChoice("control_mode", "follow"))
+  end
+
+  -- Mirror trainer_follows from the real engine mode (party / OPTIONS).
+  local function syncTrainerFollowsFromMode(mode, game)
+    local follows = (mode == "lead_trainer")
+    if optCache.trainer_follows == follows then return end
+    persistOpt("trainer_follows", follows, game)
+  end
+
+  -- Map CONTROL MODE (trainer/pokemon) + TRAINER FOLLOWS onto engine modes.
+  local function applyControlUi(game, who, trainerFollows)
     local ex = exports()
     local g = game or Game
-    if key == "control_mode" and type(ex.setControlMode) == "function" then
-      pcall(ex.setControlMode, g, value)
+    local mode
+    if who == "trainer" then
+      mode = "follow"
+      trainerFollows = false
+    elseif trainerFollows then
+      mode = "lead_trainer"
+    else
+      -- Preserve pack if already packing; otherwise solo BE MON.
+      mode = (liveMode(g) == "pack") and "pack" or "pokemon"
     end
+    applyingUi = true
+    persistOpt("trainer_follows", trainerFollows and true or false, g)
+    if type(ex.setControlMode) == "function" then
+      pcall(ex.setControlMode, g, mode)
+    else
+      persistOpt("control_mode", mode, g)
+    end
+    optCache.control_mode = mode
+    applyingUi = false
+    pcall(function()
+      if ex.syncAll then ex.syncAll(g, g and g.overworld) end
+    end)
+  end
+
+  local function setOpt(key, value, game)
+    local ex = exports()
+    local g = game or Game
+    if key == "control_mode" then
+      local who = (value == "follow" or value == "trainer") and "trainer" or "pokemon"
+      local follows = (who == "pokemon") and (
+        liveMode(g) == "lead_trainer" or optBool("trainer_follows", false))
+      applyControlUi(g, who, follows)
+      return
+    end
+    if key == "trainer_follows" then
+      local follows = value and true or false
+      -- YES forces Pokemon control; NO leaves who as-is (trainer stays trainer).
+      local who = follows and "pokemon" or (
+        liveMode(g) == "follow" and "trainer" or "pokemon")
+      applyControlUi(g, who, follows)
+      return
+    end
+    persistOpt(key, value, g)
     if key == "follower_count" and type(ex.setFollowerCount) == "function" then
       pcall(ex.setFollowerCount, g, value)
     end
@@ -102,10 +178,30 @@ return function(mod)
 
   mod.events:on("mod.options_changed", function(payload)
     if not (payload and payload.mod == mod.id) then return end
-    optCache = {}
+    optCache[payload.key] = payload.value
+    if applyingUi then return end
     local ex = exports()
-    if payload.key == "control_mode" and type(ex.setControlMode) == "function" then
-      ex.setControlMode(Game, payload.value)
+    if payload.key == "trainer_follows" then
+      local follows = payload.value and true or false
+      local mode = liveMode(Game)
+      if follows and mode ~= "lead_trainer" then
+        applyControlUi(Game, "pokemon", true)
+      elseif not follows and mode == "lead_trainer" then
+        applyControlUi(Game, "pokemon", false)
+      end
+      return
+    end
+    if payload.key == "control_mode" then
+      -- Party / setControlMode writes full engine modes; just mirror TRAINER FOLLOWS.
+      if payload.value == "lead_trainer" or payload.value == "pack"
+          or payload.value == "pokemon" or payload.value == "follow" then
+        syncTrainerFollowsFromMode(payload.value, Game)
+        return
+      end
+      if payload.value == "trainer" then
+        applyControlUi(Game, "trainer", false)
+      end
+      return
     end
     if payload.key == "follower_count" and type(ex.setFollowerCount) == "function" then
       ex.setFollowerCount(Game, payload.value)
@@ -113,6 +209,23 @@ return function(mod)
     pcall(function()
       if ex.syncAll then ex.syncAll(Game, Game and Game.overworld) end
     end)
+  end)
+
+  -- Keep OPTIONS rows in sync when party menu changes modes.
+  mod.events:once("mods.loaded", function()
+    local p = poke()
+    local ex = p and p.exports
+    if not (ex and type(ex.setControlMode) == "function") then return end
+    if ex._followersExModeWrapped then return end
+    local orig = ex.setControlMode
+    ex.setControlMode = function(game, mode)
+      orig(game, mode)
+      optCache.control_mode = mode
+      if not applyingUi then
+        syncTrainerFollowsFromMode(mode, game)
+      end
+    end
+    ex._followersExModeWrapped = true
   end)
 
   local function sync(game)
@@ -276,12 +389,28 @@ return function(mod)
     end
 
     local party = game.save.party or {}
-    local partyIndex = 1
+    local partyIndex = nil
     for i, pmon in ipairs(party) do
       if pmon == mon then partyIndex = i; break end
     end
+    if not partyIndex then
+      -- Fallback if PartyMenu ever passes a non-identical table.
+      for i, pmon in ipairs(party) do
+        if pmon and mon and pmon.species == mon.species
+            and pmon.level == mon.level
+            and pmon.nickname == mon.nickname then
+          partyIndex = i
+          break
+        end
+      end
+    end
+    partyIndex = partyIndex or 1
     local leader = ex.getLeaderMon(game)
     local isLeader = leader == mon
+      or (leader and mon and leader.species == mon.species
+          and leader.level == mon.level and leader.nickname == mon.nickname
+          and game.save.pokepcLeader and game.save.pokepcLeader.source == "party"
+          and game.save.pokepcLeader.index == partyIndex)
     local mode = type(ex.controlMode) == "function" and ex.controlMode(game) or "follow"
 
     local function packLabel()
@@ -291,86 +420,99 @@ return function(mod)
       return Strings("PACK %d%s", n, mark)
     end
 
-    table.insert(items, {
-      label = Strings(isLeader and "LEADER!" or "LEADER"),
-      onSelect = function()
-        if type(ex.setLeaderParty) == "function" then
-          ex.setLeaderParty(game, partyIndex)
-        end
-        sync(game)
-        local Sound = require("src.core.Sound")
-        Sound.play(game.data, "Swap")
-        local def = game.data.pokemon[mon.species]
-        local name = mon.nickname or (def and def.name) or mon.species
-        game.stack:push(TextBox.new(game,
-          Strings("%s is now\nthe leader!", name)))
-      end,
-    })
+    -- Already the leader: no LEADER row. Control mode does not clear / replace
+    -- the leader flag — both read pokepcLeader.
+    if not isLeader then
+      table.insert(items, {
+        label = Strings("LEADER"),
+        onSelect = function()
+          if type(ex.setLeaderParty) == "function" then
+            ex.setLeaderParty(game, partyIndex)
+          end
+          -- Leader flag only; leave control mode as-is (trainer vs pokemon).
+          pcall(function()
+            if ex.syncAll then ex.syncAll(game, game.overworld) end
+          end)
+          sync(game)
+          local Sound = require("src.core.Sound")
+          Sound.play(game.data, "Swap")
+          local def = game.data.pokemon[mon.species]
+          local name = mon.nickname or (def and def.name) or mon.species
+          game.stack:push(TextBox.new(game,
+            Strings("%s is now\nthe leader!", name)))
+        end,
+      })
+    end
 
     if isLeader then
-      table.insert(items, {
-        label = Strings(mode == "follow" and "TRAINER*" or "TRAINER"),
-        onSelect = function()
-          if ex.setControlMode then ex.setControlMode(game, "follow") end
-          sync(game)
-          game.stack:push(TextBox.new(game, Strings("You are the\ntrainer again!")))
-        end,
-      })
-      table.insert(items, {
-        label = Strings(mode == "pokemon" and "BE MON*" or "BE MON"),
-        onSelect = function()
-          if ex.setControlMode then ex.setControlMode(game, "pokemon") end
-          sync(game)
-          game.stack:push(TextBox.new(game,
-            Strings("You are now\nthe POKéMON!\f(solo)")))
-        end,
-      })
-      table.insert(items, {
-        label = Strings(mode == "lead_trainer" and "+TRAINER*" or "+TRAINER"),
-        onSelect = function()
-          if ex.setControlMode then ex.setControlMode(game, "lead_trainer") end
-          sync(game)
-          game.stack:push(TextBox.new(game,
-            Strings("POKéMON leads!\nTrainer at back.")))
-        end,
-      })
-      table.insert(items, {
-        label = packLabel(),
-        pokepcPackAdjust = true,
-        onAdjust = function(g, delta, menu)
-          local n = (type(ex.followerCount) == "function"
-            and ex.followerCount(g) or 1) + delta
-          if ex.setFollowerCount then ex.setFollowerCount(g, n) end
-          local m = type(ex.controlMode) == "function" and ex.controlMode(g) or "follow"
-          if m ~= "lead_trainer" and m ~= "follow" then
-            if ex.setControlMode then
-              local nn = type(ex.followerCount) == "function" and ex.followerCount(g) or n
-              ex.setControlMode(g, nn > 0 and "pack" or "pokemon")
+      -- Hide the active mode so the menu only lists switches.
+      if mode ~= "follow" then
+        table.insert(items, {
+          label = Strings("TRAINER"),
+          onSelect = function()
+            if ex.setControlMode then ex.setControlMode(game, "follow") end
+            sync(game)
+            game.stack:push(TextBox.new(game, Strings("You are the\ntrainer again!")))
+          end,
+        })
+      end
+      if mode ~= "pokemon" then
+        table.insert(items, {
+          label = Strings("BE MON"),
+          onSelect = function()
+            if ex.setControlMode then ex.setControlMode(game, "pokemon") end
+            sync(game)
+            game.stack:push(TextBox.new(game,
+              Strings("You are now\nthe POKéMON!\f(solo)")))
+          end,
+        })
+      end
+      if mode ~= "lead_trainer" then
+        table.insert(items, {
+          label = Strings("+TRAINER"),
+          onSelect = function()
+            if ex.setControlMode then ex.setControlMode(game, "lead_trainer") end
+            sync(game)
+            game.stack:push(TextBox.new(game,
+              Strings("POKéMON leads!\nTrainer at back.")))
+          end,
+        })
+      end
+      if mode ~= "pack" then
+        table.insert(items, {
+          label = packLabel(),
+          pokepcPackAdjust = true,
+          onAdjust = function(g, delta, menu)
+            local n = (type(ex.followerCount) == "function"
+              and ex.followerCount(g) or 1) + delta
+            if ex.setFollowerCount then ex.setFollowerCount(g, n) end
+            local m = type(ex.controlMode) == "function" and ex.controlMode(g) or "follow"
+            if m ~= "lead_trainer" and m ~= "follow" then
+              if ex.setControlMode then
+                local nn = type(ex.followerCount) == "function" and ex.followerCount(g) or n
+                ex.setControlMode(g, nn > 0 and "pack" or "pokemon")
+              end
             end
-          end
-          for _, it in ipairs(menu.subItems or {}) do
-            if it.pokepcPackAdjust then it.label = packLabel() end
-            if it.label and tostring(it.label):find("BE MON", 1, true) then
-              local cm = type(ex.controlMode) == "function" and ex.controlMode(g)
-              it.label = Strings(cm == "pokemon" and "BE MON*" or "BE MON")
+            for _, it in ipairs(menu.subItems or {}) do
+              if it.pokepcPackAdjust then it.label = packLabel() end
             end
-          end
-          local Sound = require("src.core.Sound")
-          Sound.play(g.data, "Press_AB")
-          sync(g)
-        end,
-        onSelect = function()
-          if type(ex.followerCount) == "function" and ex.followerCount(game) < 1
-             and ex.setFollowerCount then
-            ex.setFollowerCount(game, 1)
-          end
-          if ex.setControlMode then ex.setControlMode(game, "pack") end
-          sync(game)
-          game.stack:push(TextBox.new(game,
-            Strings("POKéMON leads!\n%d follow. ◀▶",
-              type(ex.followerCount) == "function" and ex.followerCount(game) or 1)))
-        end,
-      })
+            local Sound = require("src.core.Sound")
+            Sound.play(g.data, "Press_AB")
+            sync(g)
+          end,
+          onSelect = function()
+            if type(ex.followerCount) == "function" and ex.followerCount(game) < 1
+               and ex.setFollowerCount then
+              ex.setFollowerCount(game, 1)
+            end
+            if ex.setControlMode then ex.setControlMode(game, "pack") end
+            sync(game)
+            game.stack:push(TextBox.new(game,
+              Strings("POKéMON leads!\n%d follow. ◀▶",
+                type(ex.followerCount) == "function" and ex.followerCount(game) or 1)))
+          end,
+        })
+      end
     end
     return items
   end)
@@ -561,13 +703,6 @@ return function(mod)
 
   -- OPTIONS submenu (QoL-style OPEN row), same pattern as RUN MODE / SHINY.
   local FOLLOWERS_SCREEN = "FollowersExOptions"
-  local MODE_ORDER = { "follow", "pokemon", "lead_trainer", "pack" }
-  local MODE_LABEL = {
-    follow = "TRAINER",
-    pokemon = "BE MON",
-    lead_trainer = "+TRAINER",
-    pack = "PACK",
-  }
 
   local function makeFollowersScreen(game)
     local OptionRows = require("src.ui.OptionRows")
@@ -575,28 +710,52 @@ return function(mod)
       {
         label = "CONTROL MODE",
         value = function()
-          local m = optChoice("control_mode", "follow")
-          return MODE_LABEL[m] or "TRAINER"
+          return liveMode(game) == "follow" and "TRAINER" or "POKEMON"
         end,
         step = function(g)
-          local cur = optChoice("control_mode", "follow")
-          local idx = 1
-          for i, k in ipairs(MODE_ORDER) do
-            if k == cur then idx = i break end
+          if liveMode(g) == "follow" then
+            applyControlUi(g, "pokemon", optBool("trainer_follows", false))
+          else
+            applyControlUi(g, "trainer", false)
           end
-          idx = (idx % #MODE_ORDER) + 1
-          setOpt("control_mode", MODE_ORDER[idx], g)
+        end,
+      },
+      {
+        label = "TRAINER FOLLOWS",
+        value = function()
+          return (liveMode(game) == "lead_trainer"
+            or optBool("trainer_follows", false)) and "YES" or "NO"
+        end,
+        step = function(g)
+          local on = not (liveMode(g) == "lead_trainer"
+            or optBool("trainer_follows", false))
+          setOpt("trainer_follows", on, g)
         end,
       },
       {
         label = "FOLLOWERS",
         value = function()
-          return tostring(tonumber(optChoice("follower_count", 1)) or 1)
+          local ex = exports()
+          local n = type(ex.followerCount) == "function" and ex.followerCount(game)
+          if n == nil then n = tonumber(optChoice("follower_count", 1)) or 1 end
+          return tostring(n)
         end,
         step = function(g)
-          local n = tonumber(optChoice("follower_count", 1)) or 1
-          n = (n + 1) % 7
+          local ex = exports()
+          local n = type(ex.followerCount) == "function" and ex.followerCount(g)
+          if n == nil then n = tonumber(optChoice("follower_count", 1)) or 1 end
+          n = (tonumber(n) or 1) + 1
+          if n > 6 then n = 0 end
           setOpt("follower_count", n, g)
+        end,
+      },
+      {
+        label = "SHOW IN MENU",
+        value = function()
+          return optBool("show_in_menu", false) and "ON" or "OFF"
+        end,
+        step = function(g)
+          setOpt("show_in_menu", not optBool("show_in_menu", false), g)
         end,
       },
       {
@@ -675,6 +834,19 @@ return function(mod)
     end
     out[#out + 1] = row
     return out
+  end)
+
+  mod.hooks:wrap("ui.start_menu.items", function(next, game, items)
+    items = next(game, items) or items
+    if not optBool("show_in_menu", false) then return items end
+    if hasLabel(items, "FLL EX") then return items end
+    table.insert(items, {
+      label = Strings("FLL EX"),
+      onSelect = function()
+        Screens.push(game, FOLLOWERS_SCREEN)
+      end,
+    })
+    return items
   end)
 
   mod.exports.version = "1.0.0"
