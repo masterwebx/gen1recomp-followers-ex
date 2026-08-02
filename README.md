@@ -15,6 +15,10 @@ Optional: **Shiny Pokemon** for sparkles on shiny followers and wilds.
 2. Enable Followers EX
 3. Disable standalone **Wilds Follower Sprites** if you still have it
 
+## OPTIONS
+
+**FOLLOWERS EX → OPEN** — CONTROL MODE, FOLLOWERS count, WILDS SPRITES.
+
 ## Party (on the leader)
 
 - TRAINER — control the trainer again

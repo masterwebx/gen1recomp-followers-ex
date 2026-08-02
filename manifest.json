@@ -1,7 +1,7 @@
 {
   "id": "FOLLOWERS_EX",
   "name": "Followers EX",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "api": 2,
   "entry": "main.lua",
   "profile": "content",
@@ -23,5 +23,5 @@
   "permissions": [
     "engine_internals"
   ],
-  "description": "Be the Pokemon, pack size, BOX LEADER, wilds follower sheets. Needs PokéPC Followers and Wilds of Kanto."
+  "description": "Be the Pokemon, pack size, BOX LEADER, wilds follower sheets. Open FOLLOWERS EX in OPTIONS."
 }

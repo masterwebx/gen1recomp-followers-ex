@@ -64,6 +64,42 @@ return function(mod)
     return optCache[key]
   end
 
+  local function optChoice(key, default)
+    if optCache[key] ~= nil then return optCache[key] end
+    local ok, got = pcall(mod.options.get, mod.options, key)
+    optCache[key] = (ok and got ~= nil) and got or default
+    return optCache[key]
+  end
+
+  local function setOpt(key, value, game)
+    optCache[key] = value
+    pcall(function() mod.options:set(key, value) end)
+    if game and game.save then
+      game.save.options = game.save.options or {}
+      game.save.options.modOptions = game.save.options.modOptions or {}
+      game.save.options.modOptions[mod.id] =
+        game.save.options.modOptions[mod.id] or {}
+      game.save.options.modOptions[mod.id][key] = value
+    end
+    if game and game.mods then
+      game.mods.modOptions = game.mods.modOptions or {}
+      game.mods.modOptions[mod.id] = game.mods.modOptions[mod.id] or {}
+      game.mods.modOptions[mod.id][key] = value
+    end
+    if game and game.writeOptions then pcall(game.writeOptions, game) end
+    local ex = exports()
+    local g = game or Game
+    if key == "control_mode" and type(ex.setControlMode) == "function" then
+      pcall(ex.setControlMode, g, value)
+    end
+    if key == "follower_count" and type(ex.setFollowerCount) == "function" then
+      pcall(ex.setFollowerCount, g, value)
+    end
+    pcall(function()
+      if ex.syncAll then ex.syncAll(g, g and g.overworld) end
+    end)
+  end
+
   mod.events:on("mod.options_changed", function(payload)
     if not (payload and payload.mod == mod.id) then return end
     optCache = {}
@@ -523,6 +559,124 @@ return function(mod)
   mod.events:on("game.ready", installWildsFollowerSprites)
   mod.events:on("mods.loaded", installWildsFollowerSprites)
 
-  mod.exports.version = "1.0.0"
-  mod.log:info("FOLLOWERS_EX 1.0.0")
+  -- OPTIONS submenu (QoL-style OPEN row), same pattern as RUN MODE / SHINY.
+  local FOLLOWERS_SCREEN = "FollowersExOptions"
+  local MODE_ORDER = { "follow", "pokemon", "lead_trainer", "pack" }
+  local MODE_LABEL = {
+    follow = "TRAINER",
+    pokemon = "BE MON",
+    lead_trainer = "+TRAINER",
+    pack = "PACK",
+  }
+
+  local function makeFollowersScreen(game)
+    local OptionRows = require("src.ui.OptionRows")
+    local rows = {
+      {
+        label = "CONTROL MODE",
+        value = function()
+          local m = optChoice("control_mode", "follow")
+          return MODE_LABEL[m] or "TRAINER"
+        end,
+        step = function(g)
+          local cur = optChoice("control_mode", "follow")
+          local idx = 1
+          for i, k in ipairs(MODE_ORDER) do
+            if k == cur then idx = i break end
+          end
+          idx = (idx % #MODE_ORDER) + 1
+          setOpt("control_mode", MODE_ORDER[idx], g)
+        end,
+      },
+      {
+        label = "FOLLOWERS",
+        value = function()
+          return tostring(tonumber(optChoice("follower_count", 1)) or 1)
+        end,
+        step = function(g)
+          local n = tonumber(optChoice("follower_count", 1)) or 1
+          n = (n + 1) % 7
+          setOpt("follower_count", n, g)
+        end,
+      },
+      {
+        label = "WILDS SPRITES",
+        value = function()
+          return optBool("wilds_follower_sprites", true) and "ON" or "OFF"
+        end,
+        step = function(g)
+          setOpt("wilds_follower_sprites",
+            not optBool("wilds_follower_sprites", true), g)
+        end,
+      },
+    }
+    local screen = {
+      game = game, rows = rows, index = 1, scroll = 0, isOpaque = true,
+    }
+    function screen:sgbPalettes(g)
+      return require("src.render.PaletteFX").wholeNamed(g.data, "MEWMON")
+    end
+    function screen:update()
+      local input = self.game.input
+      if input:wasPressed("up") then
+        self.index = (self.index - 2) % #self.rows + 1
+      elseif input:wasPressed("down") then
+        self.index = self.index % #self.rows + 1
+      elseif input:wasPressed("left") or input:wasPressed("right")
+          or input:wasPressed("a") then
+        local row = self.rows[self.index]
+        if row and row.step then row.step(self.game) end
+      elseif input:wasPressed("b") then
+        self.game.stack:pop()
+      end
+      self.scroll = OptionRows.clampScroll(
+        self.index, self.scroll, #self.rows, nil)
+    end
+    function screen:draw()
+      OptionRows.draw(self.game, self.rows, self.index, self.scroll,
+                      "A/◀▶:CHANGE B:DONE")
+    end
+    return screen
+  end
+
+  mod.content.screens:register(FOLLOWERS_SCREEN, { new = makeFollowersScreen })
+
+  mod.events:once("mods.loaded", function()
+    local ManagerState = require("src.mods.ManagerState")
+    local routes = rawget(ManagerState, "__modOptionScreenRoutes")
+    if not routes then
+      routes = {}
+      local openOptions = ManagerState.openOptions
+      ManagerState.openOptions = function(self, manifest)
+        local screenId = manifest and routes[manifest.id]
+        if screenId then
+          return require("src.ui.Screens").push(self.game, screenId)
+        end
+        return openOptions(self, manifest)
+      end
+      ManagerState.__modOptionScreenRoutes = routes
+    end
+    routes[mod.id] = FOLLOWERS_SCREEN
+  end)
+
+  mod.hooks:wrap("ui.options.rows", function(next, game, rows)
+    local out = next(game, rows)
+    if type(out) ~= "table" then return out end
+    local row = {
+      id = mod.id .. ":open",
+      label = "FOLLOWERS EX",
+      value = function() return "OPEN" end,
+      activate = function(g)
+        require("src.ui.Screens").push(g, FOLLOWERS_SCREEN)
+      end,
+    }
+    if mod.ui and type(mod.ui.insertBefore) == "function" then
+      return mod.ui.insertBefore(out, "MODS", row)
+    end
+    out[#out + 1] = row
+    return out
+  end)
+
+  mod.exports.version = "1.0.1"
+  mod.log:info("FOLLOWERS_EX 1.0.1")
 end
