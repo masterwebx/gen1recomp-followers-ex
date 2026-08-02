@@ -1,4 +1,4 @@
--- Followers EX: control modes / pack / leaders + wilds follower sheets.
+﻿-- Followers EX: control modes / pack / leaders + wilds follower sheets.
 -- Depends on PokePCFollowers_VoxelMerge (Antigravity sprite pack).
 return function(mod)
   local Game = require("src.core.Game")
@@ -64,7 +64,7 @@ return function(mod)
       type = "toggle",
       label = "WILDS SPRITES",
       default = true,
-      help = "Use PokéPC follower walk sheets for Wilds of Kanto overworld spawns.",
+      help = "Use PokÃ©PC follower walk sheets for Wilds of Kanto overworld spawns.",
     },
   })
 
@@ -281,7 +281,7 @@ return function(mod)
         local box = Boxes.active(game.save)
         if not box or #box == 0 then
           game.stack:push(TextBox.new(game,
-            Strings("What? There are\nno POKéMON here!")))
+            Strings("What? There are\nno POKÃ©MON here!")))
           return
         end
         local rows = {}
@@ -316,7 +316,7 @@ return function(mod)
   end
 
   -- Patch the module + Screens.push (Bill's PC uses Screens.push("BoxMenu")).
-  -- Do NOT screens:register("BoxMenu") — overwriting the builtin can fail load.
+  -- Do NOT screens:register("BoxMenu") â€” overwriting the builtin can fail load.
   do
     local BoxMenu = require("src.ui.BoxMenu")
     local origBoxNew = BoxMenu._followersExOrigNew or BoxMenu.new
@@ -421,7 +421,7 @@ return function(mod)
     end
 
     -- Already the leader: no LEADER row. Control mode does not clear / replace
-    -- the leader flag — both read pokepcLeader.
+    -- the leader flag â€” both read pokepcLeader.
     if not isLeader then
       table.insert(items, {
         label = Strings("LEADER"),
@@ -463,7 +463,7 @@ return function(mod)
             if ex.setControlMode then ex.setControlMode(game, "pokemon") end
             sync(game)
             game.stack:push(TextBox.new(game,
-              Strings("You are now\nthe POKéMON!\f(solo)")))
+              Strings("You are now\nthe POKÃ©MON!\f(solo)")))
           end,
         })
       end
@@ -474,7 +474,7 @@ return function(mod)
             if ex.setControlMode then ex.setControlMode(game, "lead_trainer") end
             sync(game)
             game.stack:push(TextBox.new(game,
-              Strings("POKéMON leads!\nTrainer at back.")))
+              Strings("POKÃ©MON leads!\nTrainer at back.")))
           end,
         })
       end
@@ -508,7 +508,7 @@ return function(mod)
             if ex.setControlMode then ex.setControlMode(game, "pack") end
             sync(game)
             game.stack:push(TextBox.new(game,
-              Strings("POKéMON leads!\n%d follow. ◀▶",
+              Strings("POKÃ©MON leads!\n%d follow. â—€â–¶",
                 type(ex.followerCount) == "function" and ex.followerCount(game) or 1)))
           end,
         })
@@ -625,68 +625,97 @@ return function(mod)
     return true
   end
 
-  local function installWildsFollowerSprites()
-    if not optBool("wilds_follower_sprites", true) then return end
-    -- Prefer not double-wrapping if the standalone mod is still on.
-    if mod:find("WILDS_FOLLOWER_SPRITES") then
-      mod.log:info("WILDS_FOLLOWER_SPRITES still loaded — skip merge wrap")
-      return
-    end
-    local root = followerRoot()
-    if not root then
-      mod.log:warn("PokéPCFollowers sprite root not found for wilds sheets")
-      return
-    end
-
-    local patched = 0
-    local pokemon = mod.content.pokemon
-    if pokemon and pokemon.each then
-      for speciesId in pokemon:each() do
-        local path = followerPath(root, speciesId)
-        if fsExists(path) then
-          local spriteId = "SPRITE_OW_WILD_" .. tostring(speciesId)
-          local ok = pcall(function()
-            mod.content.sprites:patch(spriteId, {
-              image = path, frames = 6, walker = true, trueColor = true,
-            })
-          end)
-          if ok then patched = patched + 1 end
+  -- Dramatic Shape draws tall grass AFTER billboards. Raise visualY so grass
+  -- only covers feet (was previously patched into Wilds spawn_render).
+  local VOXEL_GRASS_LIFT = 8
+  local function applyVoxelGrassLift(entity)
+    if not entity or entity._followersExGrassLift then return end
+    if type(entity.pose) ~= "function" then return end
+    local prev = entity.pose
+    function entity:pose()
+      local spriteObj, px, py, facing, phase, flip, hop = prev(self)
+      if spriteObj and self.inGrassOverlay then
+        local voxelOn = self.voxelRegistered
+          or (mod:find("DRAMATIC_SHAPE") ~= nil)
+        if voxelOn and type(py) == "number" then
+          py = py - VOXEL_GRASS_LIFT
         end
       end
+      return spriteObj, px, py, facing, phase, flip, hop
     end
-    mod.log:info("patched %d wild OW sprites to follower sheets", patched)
+    entity._followersExGrassLift = true
+  end
+
+  local function installWildsFollowerSprites()
+    -- Prefer not double-wrapping if the standalone mod is still on.
+    if mod:find("WILDS_FOLLOWER_SPRITES") then
+      mod.log:info("WILDS_FOLLOWER_SPRITES still loaded â€” skip merge wrap")
+      return
+    end
 
     local wilds = mod:find(WILDS_ID)
     local render = wilds and wilds.exports and wilds.exports.render
     if not render then
-      mod.log:warn("%s not ready for wilds follower sheets", WILDS_ID)
+      mod.log:warn("%s not ready for wilds follower sheets / grass lift", WILDS_ID)
       return
     end
 
-    if not render._followersExCandidates then
-      local origCandidates = render.assetCandidates
-      function render:assetCandidates(speciesId, game, mon)
-        local candidates, monOut = origCandidates(self, speciesId, game, mon)
-        if optBool("wilds_follower_sprites", true) then
-          local path = followerPath(root, speciesId)
-          if fsExists(path) then
-            table.insert(candidates, 1, { path = path, source = "follower_sheet" })
+    local root = nil
+    if optBool("wilds_follower_sprites", true) then
+      root = followerRoot()
+      if not root then
+        mod.log:warn("PokÃ©PCFollowers sprite root not found for wilds sheets")
+      else
+        local patched = 0
+        local pokemon = mod.content.pokemon
+        if pokemon and pokemon.each then
+          for speciesId in pokemon:each() do
+            local path = followerPath(root, speciesId)
+            if fsExists(path) then
+              local spriteId = "SPRITE_OW_WILD_" .. tostring(speciesId)
+              local ok = pcall(function()
+                mod.content.sprites:patch(spriteId, {
+                  image = path, frames = 6, walker = true, trueColor = true,
+                })
+              end)
+              if ok then patched = patched + 1 end
+            end
           end
         end
-        return candidates, monOut
-      end
-      render._followersExCandidates = true
-    end
+        mod.log:info("patched %d wild OW sprites to follower sheets", patched)
 
-    if render.invalidateAssetCache then pcall(render.invalidateAssetCache, render) end
+        if not render._followersExCandidates then
+          local origCandidates = render.assetCandidates
+          function render:assetCandidates(speciesId, game, mon)
+            local candidates, monOut = origCandidates(self, speciesId, game, mon)
+            if optBool("wilds_follower_sprites", true) then
+              local path = followerPath(root, speciesId)
+              if fsExists(path) then
+                table.insert(candidates, 1, {
+                  path = path, source = "follower_sheet",
+                })
+              end
+            end
+            return candidates, monOut
+          end
+          render._followersExCandidates = true
+        end
+
+        if render.invalidateAssetCache then
+          pcall(render.invalidateAssetCache, render)
+        end
+      end
+    end
 
     if not render._followersExMake then
       local origMakeEntity = render.makeEntity
       function render:makeEntity(game, record)
         local entity = origMakeEntity(self, game, record)
-        if optBool("wilds_follower_sprites", true) then
+        if optBool("wilds_follower_sprites", true) and root then
           pcall(applyFollowerSprite, entity, root)
         end
+        -- Always: voxel grass lift (independent of sheet swap).
+        pcall(applyVoxelGrassLift, entity)
         local shiny = mod:find("SHINY_POKEMON")
         if shiny and shiny.exports and shiny.exports.onWildEntity then
           pcall(shiny.exports.onWildEntity, entity, record)
@@ -793,7 +822,7 @@ return function(mod)
     end
     function screen:draw()
       OptionRows.draw(self.game, self.rows, self.index, self.scroll,
-                      "A/◀▶:CHANGE B:DONE")
+                      "A/â—€â–¶:CHANGE B:DONE")
     end
     return screen
   end
@@ -849,6 +878,7 @@ return function(mod)
     return items
   end)
 
-  mod.exports.version = "1.0.0"
-  mod.log:info("FOLLOWERS_EX 1.0.0")
+  mod.exports.version = "1.0.1"
+  mod.log:info("FOLLOWERS_EX 1.0.1")
 end
+
