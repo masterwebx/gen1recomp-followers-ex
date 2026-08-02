@@ -1,4 +1,5 @@
 # Followers EX
+<img width="964" height="859" alt="followers" src="https://github.com/user-attachments/assets/c921af9b-431a-49ef-9283-5f2a8f0fe8be" />
 
 Control modes, pack size, party/BOX LEADER, and Wilds of Kanto overworld sprites that use PokéPC follower walk sheets.
 
