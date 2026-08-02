@@ -677,6 +677,6 @@ return function(mod)
     return out
   end)
 
-  mod.exports.version = "1.0.1"
-  mod.log:info("FOLLOWERS_EX 1.0.1")
+  mod.exports.version = "1.0.0"
+  mod.log:info("FOLLOWERS_EX 1.0.0")
 end
