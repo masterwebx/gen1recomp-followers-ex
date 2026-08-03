@@ -29,8 +29,16 @@ return function(mod)
       if not (iw and ih and iw > 0 and ih > 0) then return nil end
 
       local u0, u1, v0, v1
-      local walker = def.walker and (tonumber(def.frames) or 1) > 1
-      if walker then
+      local frames = math.max(1, tonumber(def.frames) or 1)
+      -- Gen 1 OW sheets are 16-wide vertical strips (nurse 16×48, walkers
+      -- 16×96, …). Those must keep 16×16 frame slices. The old gate only
+      -- treated def.walker strips as sliced, so static NPCs (Joy, etc.)
+      -- got the WHOLE sheet squashed onto the card — horizontal bands in
+      -- 1ST/3RD. Whole-image mapping stays for large single frames
+      -- (Wilds battle-front OW, generated sheets).
+      local owStrip = iw <= 16 and ih >= 32
+      local sliceFrames = frames > 1 or owStrip or def.walker
+      if sliceFrames then
         local fy = (tonumber(frame) or 0) * 16
         if fy + 16 > ih then fy = 0 end
         local fw = math.min(16, iw)
@@ -54,7 +62,7 @@ return function(mod)
     function SB.mesh(def, frame)
       if not def or type(def.image) ~= "string" then return nil end
       local key = def.image .. "#" .. tostring(frame or 0)
-        .. "#exuv3#" .. tostring(def.frames or 1)
+        .. "#exuv4#" .. tostring(def.frames or 1)
         .. (def.walker and "W" or "S")
       if meshCache[key] == nil then
         local ok, m = pcall(buildCard, def, frame)

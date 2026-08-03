@@ -1166,12 +1166,12 @@ return function(mod)
     return items
   end)
 
-  mod.exports.version = "1.0.17"
+  mod.exports.version = "1.0.18"
   mod.exports.liveFollowerCount = liveFollowerCount
   mod.exports.pokeReady = pokeReady
   mod.exports.ensureControlEngine = ensureControlEngine
   mod.exports.ensureWildsExtras = ensureWildsExtras
   mod.exports.getSpriteSet = getSpriteSet
-  mod.log:info("FOLLOWERS_EX 1.0.17 — grass lift default off; Yellow Pikachu/leader slots")
+  mod.log:info("FOLLOWERS_EX 1.0.18 — OW strip UV fix for static NPCs (nurse etc.)")
 end
 

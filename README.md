@@ -1,6 +1,6 @@
 # Followers EX
 
-Control modes, pack size, party/BOX LEADER. Pack, player-as-Pokemon, and Wilds OW spawns use **PokePC** walker sheets (16×96). Includes a Dramatic Shape billboard UV fix so non-walker sheets are not zoomed into their top-left 16×16.
+Control modes, pack size, party/BOX LEADER. Pack, player-as-Pokemon, and Wilds OW spawns use **PokePC** walker sheets (16×96). Includes a Dramatic Shape billboard UV fix: large single-frame sheets are not zoomed into their top-left 16×16, and Gen 1 16-wide OW strips (nurse, static NPCs, walkers) keep proper 16×16 frame slices.
 
 ## Requires
 
