@@ -1,6 +1,6 @@
 # Followers EX
 
-Control modes, pack size, party/BOX LEADER. Pack, player-as-Pokemon, and Wilds OW spawns use **PokePC** walker sheets (16×96). Includes a Dramatic Shape billboard UV fix: large single-frame sheets are not zoomed into their top-left 16×16, and Gen 1 16-wide OW strips (nurse, static NPCs, walkers) keep proper 16×16 frame slices.
+Control modes, pack size, party/BOX LEADER. Pack, player-as-Pokemon, and Wilds OW spawns use **PokePC** walker sheets (16×96). Includes a Dramatic Shape billboard UV fix so non-walker sheets are not zoomed into their top-left 16×16.
 
 ## Requires
 
@@ -21,8 +21,10 @@ Pause **OPTIONS → FOLLOWERS EX → OPEN**:
 - **TRAINER FOLLOWS** — YES puts you on the Pokemon with the trainer trailing
 - **FOLLOWERS** — how many party mons trail (0–6)
 - **SHOW IN MENU** — Start menu entry **FLL EX** (default off)
-- **TOWN SPAWNS** / **REACHABLE ONLY** — legacy Wilds only (N/A on 0.5.7+)
+- **TOWN SPAWNS** — ON allows wild OW spawns in towns (borrows a nearby route’s grass table)
 - **GRASS LIFT** — ON = wilds above tall grass; OFF = immersed (default **off**)
+
+Wild OW spawn tiles are always filtered to what the player can walk to (ledges count as reachable).
 
 Wilds animated OW sprites are forced off so spawns use the same PokePC walker sheets as the pack (correct 16×16 billboard framing under Dramatic Shape).
 

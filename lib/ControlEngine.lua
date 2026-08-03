@@ -54,6 +54,31 @@ return function(hostMod, assetMod)
   local Boxes = require("src.pokemon.Boxes")
   local Stats = require("src.pokemon.Stats")
   local NPC = require("src.world.NPC")
+  local Collision = require("src.world.Collision")
+
+  -- Same ledge test as stock PikachuFollower (two-cell hop over ledge tiles).
+  local function ledgeStep(game, ow, cx, cy, dir)
+    if not (game and ow and ow.map and dir and Collision.DELTA[dir]) then
+      return false
+    end
+    local map = ow.map
+    local d = Collision.DELTA[dir]
+    local fx, fy = cx + d[1], cy + d[2]
+    local lx, ly = cx + d[1] * 2, cy + d[2] * 2
+    if not (map:inBounds(fx, fy) and map:inBounds(lx, ly)) then return false end
+    local tileset = map.def and map.def.tileset
+    local standing = map:cellTile(cx, cy)
+    local front = map:cellTile(fx, fy)
+    local ledges = game.data and game.data.field and game.data.field.ledges
+    for _, ledge in ipairs(ledges or {}) do
+      if (ledge.tileset or "OVERWORLD") == tileset
+         and ledge.facing == dir and ledge.input == dir
+         and ledge.standingTile == standing and ledge.ledgeTile == front then
+        return true
+      end
+    end
+    return false
+  end
 
   -- control_mode / follower_count UI live in FOLLOWERS_EX (separate credit).
   -- Runtime still reads save.pokepcControlMode / pokepcFollowerCount.
@@ -756,27 +781,37 @@ return function(hostMod, assetMod)
     -- Trail commits track the anchor (stock Pika when Yellow follow is active).
     local destX = anchor.targetX or anchor.cellX
     local destY = anchor.targetY or anchor.cellY
-    ow.pokepcTrailHead = ow.pokepcTrailHead or { x = anchor.cellX, y = anchor.cellY }
+    ow.pokepcTrailHead = ow.pokepcTrailHead
+      or { x = anchor.cellX, y = anchor.cellY, ledgeHop = nil }
     local head = ow.pokepcTrailHead
     local committed = (destX ~= head.x or destY ~= head.y)
     if committed then
-      local goals = ow.pokepcTrailCells or {}
-      for i = #trailers, 2, -1 do
-        local prev = goals[i - 1]
-        goals[i] = prev and { x = prev.x, y = prev.y } or { x = head.x, y = head.y }
-      end
-      if #trailers >= 1 then
-        goals[1] = { x = head.x, y = head.y }
-      end
-      ow.pokepcTrailCells = goals
-      head.x, head.y = destX, destY
-    elseif not mapEnter and not dirty then
-      -- Cheap idle: facing only.
-      for _, npc in ipairs(trailers) do
-        if not npc.moving then
-          npc.facing = facing or npc.facing
+      local stepDir = destY > head.y and "down" or destY < head.y and "up"
+                      or destX > head.x and "right" or "left"
+      -- Ledge hops commit two player steps but only one follow command
+      -- (stock PikachuFollower trail.ledgeHop). Skip shifting goals on the
+      -- landing step so the pack does not desync across the ledge.
+      if head.ledgeHop == stepDir then
+        head.ledgeHop = nil
+        head.x, head.y = destX, destY
+      else
+        head.ledgeHop = ledgeStep(game, ow, head.x, head.y, stepDir)
+                        and stepDir or nil
+        local goals = ow.pokepcTrailCells or {}
+        for i = #trailers, 2, -1 do
+          local prev = goals[i - 1]
+          goals[i] = prev and { x = prev.x, y = prev.y }
+            or { x = head.x, y = head.y }
         end
+        if #trailers >= 1 then
+          goals[1] = { x = head.x, y = head.y }
+        end
+        ow.pokepcTrailCells = goals
+        head.x, head.y = destX, destY
       end
+    elseif not mapEnter and not dirty then
+      -- Idle: leave each trailer's facing alone. Copying the anchor here made
+      -- the whole pack spin in lockstep with Yellow stock Pikachu idle.
       return
     end
 
@@ -791,7 +826,7 @@ return function(hostMod, assetMod)
           local far = math.abs((npc.cellX or 0) - gx) + math.abs((npc.cellY or 0) - gy)
           -- Never snap for 1–2 tiles; only warp-distance teleports.
           if far > 6 then
-            placeTrailerAt(npc, gx, gy, facing or npc.facing)
+            placeTrailerAt(npc, gx, gy, npc.facing or facing)
           else
             local dir
             if npc.cellX < gx then dir = "right"
@@ -799,8 +834,17 @@ return function(hostMod, assetMod)
             elseif npc.cellY < gy then dir = "down"
             else dir = "up" end
             npc.facing = dir
+            npc.hopStep = nil
             npc.targetX = npc.cellX + (dir == "right" and 1 or dir == "left" and -1 or 0)
             npc.targetY = npc.cellY + (dir == "down" and 1 or dir == "up" and -1 or 0)
+            -- Clear both ledge cells in one hop (stock hopStep).
+            if ledgeStep(game, ow, npc.cellX, npc.cellY, dir) then
+              local d = Collision.DELTA[dir]
+              npc.targetX = npc.cellX + d[1] * 2
+              npc.targetY = npc.cellY + d[2] * 2
+              goals[i] = { x = npc.targetX, y = npc.targetY }
+              npc.hopStep = true
+            end
             -- Match stock PikachuFollower step clock (incl. FastPikachuFollow).
             local stepLen = stepClock
             if far > 1 and not npc.hopStep then
@@ -815,9 +859,8 @@ return function(hostMod, assetMod)
               npc:update(ow.map, ow.entities)
             end
           end
-        else
-          npc.facing = facing or npc.facing
         end
+        -- At goal: keep own facing (do not mirror anchor idle spin).
       end
     end
   end

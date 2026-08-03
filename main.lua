@@ -92,14 +92,7 @@ return function(mod)
       type = "toggle",
       label = "TOWN SPAWNS",
       default = false,
-      help = "Legacy Wilds only (town borrow). Off by default so modern Wilds is left alone.",
-    },
-    {
-      key = "wilds_require_reachable",
-      type = "toggle",
-      label = "REACHABLE ONLY",
-      default = false,
-      help = "Legacy Wilds only. Off by default.",
+      help = "Allow wild OW spawns in towns (borrows a nearby route grass table).",
     },
     {
       key = "wilds_grass_lift",
@@ -791,13 +784,18 @@ return function(mod)
     entity.final2DScale = 1
     entity.visualScale = 1
     entity.voxelScale = 1
+    -- Keep Wilds immersion height. Forcing 0 made converted spawns sit
+    -- above grass while unconverted ones stayed tucked under it.
+    local prevOcc = entity.grassOcclusionHeight
+      or (entity.scaleInfo and entity.scaleInfo.grassOcclusionHeight)
+    local occ = (type(prevOcc) == "number" and prevOcc > 0) and prevOcc or 6
     entity.scaleInfo = {
       scale = 1, final2DScale = 1, contentW = 16, contentH = 16,
       offsetX = 0, offsetY = 0, imageW = 16, imageH = 96,
       renderedW = 16, renderedH = 16, originalW = 16, originalH = 96,
-      logicalFootprintTiles = 1, grassOcclusionHeight = 0,
+      logicalFootprintTiles = 1, grassOcclusionHeight = occ,
     }
-    entity.grassOcclusionHeight = 0
+    entity.grassOcclusionHeight = occ
     if entity.animation then
       entity.animation.source = "POKEPC_WALKERS"
     end
@@ -813,6 +811,17 @@ return function(mod)
       end
       entity._followersExPokepcPose = true
     end
+
+    -- Refresh immersion flags so sheet swap does not leave a stale "above grass" state.
+    pcall(function()
+      local wilds = mod:find(WILDS_ID)
+      local V = wilds and wilds.exports and wilds.exports.lib
+      if not (V and type(V.require) == "function") then return end
+      local ok, GrassOcclusion = pcall(V.require, "grass_occlusion")
+      if not (ok and GrassOcclusion and GrassOcclusion.updateInGrassFlag) then return end
+      local map = Game.overworld and Game.overworld.map
+      GrassOcclusion.updateInGrassFlag(entity, wilds, map)
+    end)
     return true
   end
 
@@ -1035,36 +1044,12 @@ return function(mod)
       {
         label = "TOWN SPAWNS",
         value = function()
-          local wilds = mod:find(WILDS_ID)
-          if wildsOwnsOwSprites(wilds) then return "N/A" end
           return optBool("wilds_town_spawns", false) and "ON" or "OFF"
         end,
         step = function(g)
           local wilds = mod:find(WILDS_ID)
-          if wildsOwnsOwSprites(wilds) then return end
           local on = not optBool("wilds_town_spawns", false)
           setOpt("wilds_town_spawns", on, g)
-          pcall(function()
-            local logic = wilds and wilds.exports and wilds.exports.logic
-            local ow = g and g.overworld
-            if logic and ow and ow.map and type(logic.initializeForMap) == "function" then
-              logic:initializeForMap(ow.map.id, g)
-            end
-          end)
-        end,
-      },
-      {
-        label = "REACHABLE ONLY",
-        value = function()
-          local wilds = mod:find(WILDS_ID)
-          if wildsOwnsOwSprites(wilds) then return "N/A" end
-          return optBool("wilds_require_reachable", false) and "ON" or "OFF"
-        end,
-        step = function(g)
-          local wilds = mod:find(WILDS_ID)
-          if wildsOwnsOwSprites(wilds) then return end
-          local on = not optBool("wilds_require_reachable", false)
-          setOpt("wilds_require_reachable", on, g)
           pcall(function()
             local logic = wilds and wilds.exports and wilds.exports.logic
             local ow = g and g.overworld
@@ -1166,12 +1151,12 @@ return function(mod)
     return items
   end)
 
-  mod.exports.version = "1.0.18"
+  mod.exports.version = "1.0.19"
   mod.exports.liveFollowerCount = liveFollowerCount
   mod.exports.pokeReady = pokeReady
   mod.exports.ensureControlEngine = ensureControlEngine
   mod.exports.ensureWildsExtras = ensureWildsExtras
   mod.exports.getSpriteSet = getSpriteSet
-  mod.log:info("FOLLOWERS_EX 1.0.18 — OW strip UV fix for static NPCs (nurse etc.)")
+  mod.log:info("FOLLOWERS_EX 1.0.19 — idle facing, ledge hop, grass occlude, always-reachable")
 end
 

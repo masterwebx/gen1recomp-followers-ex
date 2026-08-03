@@ -142,11 +142,11 @@ return function(hostMod)
       hostMod.log:info("WildsExtras: native town support present; skip")
       return true
     end
+    -- Wilds 0.5.7+/0.6: still inject town borrow + reachable filter. The
+    -- Surface.resolve patch is scoped to initializeForMap only.
     if wildsIsModern(wilds) then
-      hostMod.log:info("WildsExtras: Wilds %s owns spawn pipeline; skip town/reachable inject",
+      hostMod.log:info("WildsExtras: Wilds %s — installing town/reachable (modern)",
         tostring(wilds.version or "?"))
-      logic._followersExWildsExtras = true
-      return true
     end
 
     local V = wilds.exports.lib
@@ -306,8 +306,8 @@ return function(hostMod)
           self.state.encounterSource = "town:" .. tostring(townSource)
         end
 
-        if result and optBool("wilds_require_reachable", false)
-           and self.eligibleCache and #self.eligibleCache > 0 then
+        -- Always filter to player-reachable tiles (ledges count as passable).
+        if result and self.eligibleCache and #self.eligibleCache > 0 then
           if ow and ow.map and ow.player and self.surfaceInfo then
             local before = #self.eligibleCache
             self.eligibleCache = Grass.filterPlayerReachable(
