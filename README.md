@@ -1,13 +1,17 @@
 # Followers EX
 
-Control modes, pack size, party/BOX LEADER, and Wilds of Kanto overworld sprites that use PokéPC follower walk sheets.
+Control modes, pack size, party/BOX LEADER. Pack, player-as-Pokemon, and Wilds OW spawns use **PokePC** walker sheets (16×96). Includes a Dramatic Shape billboard UV fix so non-walker sheets are not zoomed into their top-left 16×16.
 
 ## Requires
 
-- **PokéPC Followers Voxel Merge** (`PokePCFollowers_VoxelMerge`) — public stub is enough for sprites; Followers EX embeds the control/pack/trailer engine.
-- **Wilds of Kanto** (`overworld_wild_spawns`) — public release is enough; Followers EX adds town spawns + reachable-tile filter.
+- [gen1recomp](https://github.com/bryanthaboi/gen1recomp) / pokemon-love2d (mod API 2)
+- [PokéPC Followers](https://github.com/gamecorner-033/PokePCFollowers) (`PokePCFollowers_VoxelMerge` or compatible sprite pack) — sprites; Followers EX embeds the control/pack/trailer engine
+- [Wilds of Kanto](https://github.com/YoDrehDenSwagAuf/overworld-spawn-mod) (`overworld_wild_spawns`) — 0.6.x recommended
 
-Optional: Shiny Pokemon for sparkles on followers/wilds.
+### Optional
+
+- [Shiny Pokemon](https://github.com/masterwebx/gen1recomp-shiny-pokemon) — PokePC sheet bake + sparkles for pack shinies
+- [Dramatic Shape](https://github.com/DramaticShape/DramaticShapeVoxelMod) — voxel overworld (billboard UV fix applies when present)
 
 ## OPTIONS
 
@@ -17,14 +21,16 @@ Pause **OPTIONS → FOLLOWERS EX → OPEN**:
 - **TRAINER FOLLOWS** — YES puts you on the Pokemon with the trainer trailing
 - **FOLLOWERS** — how many party mons trail (0–6)
 - **SHOW IN MENU** — Start menu entry **FLL EX** (default off)
-- **WILDS SPRITES** — wild overworld mons use follower sheets
-- **TOWN SPAWNS** — wilds in towns (borrow route grass / default)
-- **REACHABLE ONLY** — only tiles the player can walk/surf/ledge to
-- Voxel tall-grass lift for wild billboards (so stock Wilds does not need a local patch)
+- **TOWN SPAWNS** / **REACHABLE ONLY** — legacy Wilds only (N/A on 0.5.7+)
+- **GRASS LIFT** — ON = wilds above tall grass; OFF = immersed (default **off**)
+
+Wilds animated OW sprites are forced off so spawns use the same PokePC walker sheets as the pack (correct 16×16 billboard framing under Dramatic Shape).
+
+- Yellow: setting **LEADER** always puts that mon in party slot **2**; **Pikachu stays slot 1** as the talkable companion (trainer and pokemon modes)
+- Yellow **TRAINER** follow keeps the stock talkable Pikachu; other party mons trail *behind* it
+- Yellow **POKEMON** / pack modes: face the party Pikachu trailer and press A for the emotion scene
 
 ## Party (leader only)
-
-Active mode is hidden. Remaining choices:
 
 - **LEADER** — set this party mon as leader (hidden if already leader)
 - **TRAINER** / **BE MON** / **+TRAINER** / **PACK N** (◀▶ changes N)

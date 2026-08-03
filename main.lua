@@ -1,4 +1,4 @@
--- Followers EX: control modes / pack / leaders + wilds follower sheets.
+-- Followers EX: control modes / pack / leaders (PokePC walker sheets).
 -- Depends on PokePCFollowers_VoxelMerge (Antigravity sprite pack).
 return function(mod)
   local Game = require("src.core.Game")
@@ -8,7 +8,6 @@ return function(mod)
   local PartyMenu = require("src.ui.PartyMenu")
   local Boxes = require("src.pokemon.Boxes")
   local Screens = require("src.ui.Screens")
-  local SpriteRenderer = require("src.render.SpriteRenderer")
 
   local WILDS_ID = "overworld_wild_spawns"
   local FOLLOWERS_ID = "PokePCFollowers_VoxelMerge"
@@ -33,6 +32,10 @@ return function(mod)
 
   local ControlEngine = libRequire("ControlEngine")
   local WildsExtras = libRequire("WildsExtras")
+  local BillboardUvFix = libRequire("BillboardUvFix")
+  if type(BillboardUvFix) == "function" then
+    BillboardUvFix = BillboardUvFix(mod)
+  end
 
   local function poke()
     return mod:find(FOLLOWERS_ID)
@@ -85,25 +88,25 @@ return function(mod)
       help = "Add FOLLOWERS EX to the Start menu.",
     },
     {
-      key = "wilds_follower_sprites",
-      type = "toggle",
-      label = "WILDS SPRITES",
-      default = true,
-      help = "Use PokéPC follower walk sheets for Wilds of Kanto overworld spawns.",
-    },
-    {
       key = "wilds_town_spawns",
       type = "toggle",
       label = "TOWN SPAWNS",
-      default = true,
-      help = "Allow Wilds of Kanto spawns in towns (borrow route grass / default).",
+      default = false,
+      help = "Legacy Wilds only (town borrow). Off by default so modern Wilds is left alone.",
     },
     {
       key = "wilds_require_reachable",
       type = "toggle",
       label = "REACHABLE ONLY",
-      default = true,
-      help = "Only spawn wilds on tiles the player can walk/surf/ledge to.",
+      default = false,
+      help = "Legacy Wilds only. Off by default.",
+    },
+    {
+      key = "wilds_grass_lift",
+      type = "toggle",
+      label = "GRASS LIFT",
+      default = false,
+      help = "ON = wilds drawn above tall grass; OFF = immersed in grass (Wilds 0.6 mode).",
     },
   })
 
@@ -214,12 +217,14 @@ return function(mod)
     end
     applyingUi = true
     persistOpt("trainer_follows", trainerFollows and true or false, g)
+    -- Keep OPTIONS choice in sync (follow/pokemon), engine mode on the save.
+    persistOpt("control_mode", who == "trainer" and "follow" or "pokemon", g)
     if type(ex.setControlMode) == "function" then
       pcall(ex.setControlMode, g, mode)
-    else
-      persistOpt("control_mode", mode, g)
+    elseif g and g.save then
+      g.save.pokepcControlMode = mode
     end
-    optCache.control_mode = mode
+    optCache.control_mode = who == "trainer" and "follow" or "pokemon"
     applyingUi = false
     pcall(function()
       if ex.syncAll then ex.syncAll(g, g and g.overworld) end
@@ -707,7 +712,7 @@ return function(mod)
     return items
   end)
 
-  -- ------- Wilds follower sheets (merged from WILDS_FOLLOWER_SPRITES)
+  -- ------- Wilds OW: PokePC walker sheets + Dramatic Shape UV fix
   local function fsExists(path)
     if type(path) ~= "string" or path == "" then return false end
     local fs = love and love.filesystem
@@ -726,8 +731,8 @@ return function(mod)
       end
     end
     for _, root in ipairs({
-      "mods/PokePCFollowers-main",
       "mods/PokePCFollowers_VoxelMerge",
+      "mods/PokePCFollowers-main",
       "mods/PokePCFollowers",
     }) do
       if fsExists(root .. "/assets/sprites/follower_CHARMANDER.png") then
@@ -760,15 +765,16 @@ return function(mod)
     return ((x + y) % 2) == 1
   end
 
-  local function applyFollowerSprite(entity, root)
-    if not entity or entity.hiddenEncounter or not entity.visibleSprite then
+  local function applyPokepcWalkerSprite(entity, root)
+    if not entity or entity.hiddenEncounter or entity.visibleSprite == false then
       return false
     end
     local species = entity.species
-    if not species then return false end
+    if not species or not root then return false end
     local path = followerPath(root, species)
     if not fsExists(path) then return false end
 
+    local SpriteRenderer = require("src.render.SpriteRenderer")
     local def = {
       image = path, frames = 6, walker = true, trueColor = true,
       id = "SPRITE_OW_WILD_" .. tostring(species),
@@ -777,9 +783,11 @@ return function(mod)
     if not ok or not sprite then return false end
 
     entity.sprite = sprite
-    entity.spriteId = def.id
+    entity.legacySprite = sprite
+    entity.worldSprite = nil
+    entity.usingEnhancedSprite = false
     entity.usingFollowerSprite = true
-    entity.usingFallback = false
+    entity.spriteId = def.id
     entity.final2DScale = 1
     entity.visualScale = 1
     entity.voxelScale = 1
@@ -790,135 +798,188 @@ return function(mod)
       logicalFootprintTiles = 1, grassOcclusionHeight = 0,
     }
     entity.grassOcclusionHeight = 0
+    if entity.animation then
+      entity.animation.source = "POKEPC_WALKERS"
+    end
     if entity.entityPhase == "FALLBACK_LOADED" or entity.entityPhase == "CREATING" then
       entity.entityPhase = "REAL_ASSET_LOADED"
     end
 
-    local origPose = entity.pose
-    function entity:pose()
-      local spriteObj, px, py, facing, _, _, hop = origPose(self)
-      return spriteObj, px, py, facing, walkPhaseOf(self), stepFlipOf(self), hop
-    end
-
-    function entity:_drawScaledSprite(camX, camY, opacity)
-      local spriteObj, px, py, facing, phase, flip = self:pose()
-      if not spriteObj then return end
-      opacity = opacity or 1
-      if opacity < 1 and love and love.graphics and love.graphics.setColor then
-        love.graphics.setColor(1, 1, 1, opacity)
-        spriteObj:draw(px, py, camX, camY, facing, phase, flip)
-        love.graphics.setColor(1, 1, 1, 1)
-      else
-        spriteObj:draw(px, py, camX, camY, facing, phase, flip)
+    if not entity._followersExPokepcPose then
+      local origPose = entity.pose
+      function entity:pose()
+        local spriteObj, px, py, facing, _, _, hop = origPose(self)
+        return spriteObj, px, py, facing, walkPhaseOf(self), stepFlipOf(self), hop
       end
+      entity._followersExPokepcPose = true
     end
     return true
+  end
+
+  local function setWildsModOption(game, key, value)
+    local g = game or Game
+    if g and g.save then
+      g.save.options = g.save.options or {}
+      g.save.options.modOptions = g.save.options.modOptions or {}
+      g.save.options.modOptions[WILDS_ID] =
+        g.save.options.modOptions[WILDS_ID] or {}
+      g.save.options.modOptions[WILDS_ID][key] = value
+    end
+    local mods = g and g.mods
+    if mods then
+      if mods.modOptions then
+        mods.modOptions[WILDS_ID] = mods.modOptions[WILDS_ID] or {}
+        mods.modOptions[WILDS_ID][key] = value
+      end
+      if mods.loader and mods.loader.modOptions then
+        mods.loader.modOptions[WILDS_ID] = mods.loader.modOptions[WILDS_ID] or {}
+        mods.loader.modOptions[WILDS_ID][key] = value
+      end
+    end
+    if g and g.writeOptions then pcall(g.writeOptions, g) end
+    if mods and mods.events and type(mods.events.emit) == "function" then
+      pcall(mods.events.emit, mods.events, "mod.options_changed", {
+        mod = WILDS_ID, key = key, value = value,
+      })
+    end
   end
 
   -- Dramatic Shape draws tall grass AFTER billboards. Raise visualY so grass
   -- only covers feet (was previously patched into Wilds spawn_render).
   local VOXEL_GRASS_LIFT = 8
+  local function grassLiftOn()
+    return optBool("wilds_grass_lift", false) == true
+  end
+
   local function applyVoxelGrassLift(entity)
     if not entity or entity._followersExGrassLift then return end
     if type(entity.pose) ~= "function" then return end
     local prev = entity.pose
     function entity:pose()
       local spriteObj, px, py, facing, phase, flip, hop = prev(self)
-      if spriteObj and self.inGrassOverlay then
-        local voxelOn = self.voxelRegistered
-          or (mod:find("DRAMATIC_SHAPE") ~= nil)
-        if voxelOn and type(py) == "number" then
-          py = py - VOXEL_GRASS_LIFT
-        end
+      if grassLiftOn() and spriteObj and self.inGrassOverlay
+         and type(py) == "number" then
+        py = py - VOXEL_GRASS_LIFT
       end
       return spriteObj, px, py, facing, phase, flip, hop
     end
     entity._followersExGrassLift = true
   end
 
-  local function installWildsFollowerSprites()
-    -- Prefer not double-wrapping if the standalone mod is still on.
-    if mod:find("WILDS_FOLLOWER_SPRITES") then
-      mod.log:info("WILDS_FOLLOWER_SPRITES still loaded â€” skip merge wrap")
-      return
+  -- Wilds 0.5.7+ / 0.6.0 ships native follow-sprites + EnhancedWorldSprite.
+  local function wildsOwnsOwSprites(wilds)
+    if not wilds then return false end
+    local render = wilds.exports and wilds.exports.render
+    if render and (type(render.attachEnhancedToEntity) == "function"
+                   or type(render.syncEntityAnimation) == "function") then
+      return true
     end
+    local ver = tostring(wilds.version or (wilds.exports and wilds.exports.version) or "")
+    local maj, min = ver:match("^(%d+)%.(%d+)")
+    maj, min = tonumber(maj), tonumber(min)
+    return maj ~= nil and min ~= nil and (maj > 0 or min >= 5)
+  end
 
+  local function applyGrassLiftToWilds(game)
     local wilds = mod:find(WILDS_ID)
-    local render = wilds and wilds.exports and wilds.exports.render
-    if not render then
-      mod.log:warn("%s not ready for wilds follower sheets / grass lift", WILDS_ID)
-      return
+    if not wilds then return end
+    local mode = grassLiftOn() and "above" or "immersed"
+    setWildsModOption(game, "pokemon_grass_render_mode", mode)
+    local logic = wilds.exports and wilds.exports.logic
+    if logic and type(logic.onOptionsChanged) == "function" then
+      pcall(logic.onOptionsChanged, logic, {
+        mod = WILDS_ID,
+        key = "pokemon_grass_render_mode",
+        value = mode,
+      })
     end
-
-    local root = nil
-    if optBool("wilds_follower_sprites", true) then
-      root = followerRoot()
-      if not root then
-        mod.log:warn("PokÃ©PCFollowers sprite root not found for wilds sheets")
-      else
-        local patched = 0
-        local pokemon = mod.content.pokemon
-        if pokemon and pokemon.each then
-          for speciesId in pokemon:each() do
-            local path = followerPath(root, speciesId)
-            if fsExists(path) then
-              local spriteId = "SPRITE_OW_WILD_" .. tostring(speciesId)
-              local ok = pcall(function()
-                mod.content.sprites:patch(spriteId, {
-                  image = path, frames = 6, walker = true, trueColor = true,
-                })
-              end)
-              if ok then patched = patched + 1 end
-            end
-          end
-        end
-        mod.log:info("patched %d wild OW sprites to follower sheets", patched)
-
-        if not render._followersExCandidates then
-          local origCandidates = render.assetCandidates
-          function render:assetCandidates(speciesId, game, mon)
-            local candidates, monOut = origCandidates(self, speciesId, game, mon)
-            if optBool("wilds_follower_sprites", true) then
-              local path = followerPath(root, speciesId)
-              if fsExists(path) then
-                table.insert(candidates, 1, {
-                  path = path, source = "follower_sheet",
-                })
-              end
-            end
-            return candidates, monOut
-          end
-          render._followersExCandidates = true
-        end
-
-        if render.invalidateAssetCache then
-          pcall(render.invalidateAssetCache, render)
-        end
+    if not wildsOwnsOwSprites(wilds) then
+      local ow = game and game.overworld
+      for _, e in ipairs((ow and ow.entities) or {}) do
+        if e and e.spawnId then pcall(applyVoxelGrassLift, e) end
       end
-    end
-
-    if not render._followersExMake then
-      local origMakeEntity = render.makeEntity
-      function render:makeEntity(game, record)
-        local entity = origMakeEntity(self, game, record)
-        if optBool("wilds_follower_sprites", true) and root then
-          pcall(applyFollowerSprite, entity, root)
-        end
-        -- Always: voxel grass lift (independent of sheet swap).
-        pcall(applyVoxelGrassLift, entity)
-        local shiny = mod:find("SHINY_POKEMON")
-        if shiny and shiny.exports and shiny.exports.onWildEntity then
-          pcall(shiny.exports.onWildEntity, entity, record)
-        end
-        return entity
-      end
-      render._followersExMake = true
     end
   end
 
-  installWildsFollowerSprites()
-  mod.events:on("game.ready", installWildsFollowerSprites)
-  mod.events:on("mods.loaded", installWildsFollowerSprites)
+  local function refreshWildGrassLift(game)
+    applyGrassLiftToWilds(game)
+  end
+
+  -- Compatibility stub: pack art is always PokePC walker sheets.
+  local function getSpriteSet()
+    return "pokepc"
+  end
+
+  local function installPokepcOwPipeline()
+    if BillboardUvFix and type(BillboardUvFix.install) == "function" then
+      local ok, detail = BillboardUvFix.install()
+      if ok then
+        mod.log:info("billboard UV fix: %s", tostring(detail))
+      else
+        mod.log:warn("billboard UV fix failed: %s", tostring(detail))
+      end
+    end
+
+    local wilds = mod:find(WILDS_ID)
+    if not (wilds and wilds.exports and wilds.exports.render) then
+      return
+    end
+
+    -- Prefer PokePC walker sheets over Wilds enhanced (wrong card UV when off,
+    -- and user asked for PokePC exclusively).
+    setWildsModOption(Game, "use_animated_overworld_sprites", false)
+
+    local root = followerRoot()
+    local render = wilds.exports.render
+    if root and render and not render._followersExPokepcMake then
+      local origMake = render.makeEntity
+      if type(origMake) == "function" then
+        function render:makeEntity(game, record)
+          local entity = origMake(self, game, record)
+          if entity then
+            pcall(applyPokepcWalkerSprite, entity, root)
+            pcall(applyVoxelGrassLift, entity)
+          end
+          return entity
+        end
+        render._followersExPokepcMake = true
+        mod.log:info("Wilds makeEntity → PokePC walker sheets (%s)", root)
+      end
+    end
+
+    -- Retarget already-spawned wilds.
+    if root then
+      local logic = wilds.exports.logic
+      local ents = logic and logic.entities
+      if type(ents) == "table" then
+        for _, e in pairs(ents) do
+          if e and e.overworldWildSpawn then
+            pcall(applyPokepcWalkerSprite, e, root)
+            pcall(applyVoxelGrassLift, e)
+          end
+        end
+      end
+    end
+
+    pcall(applyGrassLiftToWilds, Game)
+  end
+
+  mod.events:on("mods.loaded", installPokepcOwPipeline)
+  mod.events:on("game.ready", installPokepcOwPipeline)
+  mod.events:on("map.entered", function()
+    local wilds = mod:find(WILDS_ID)
+    local root = followerRoot()
+    if not (wilds and root) then return end
+    local logic = wilds.exports and wilds.exports.logic
+    local ents = logic and logic.entities
+    if type(ents) ~= "table" then return end
+    for _, e in pairs(ents) do
+      if e and e.overworldWildSpawn and not e.usingFollowerSprite then
+        pcall(applyPokepcWalkerSprite, e, root)
+        pcall(applyVoxelGrassLift, e)
+      end
+    end
+  end)
 
   -- OPTIONS submenu (QoL-style OPEN row), same pattern as RUN MODE / SHINY.
   local FOLLOWERS_SCREEN = "FollowersExOptions"
@@ -972,26 +1033,18 @@ return function(mod)
         end,
       },
       {
-        label = "WILDS SPRITES",
-        value = function()
-          return optBool("wilds_follower_sprites", true) and "ON" or "OFF"
-        end,
-        step = function(g)
-          setOpt("wilds_follower_sprites",
-            not optBool("wilds_follower_sprites", true), g)
-        end,
-      },
-      {
         label = "TOWN SPAWNS",
         value = function()
-          return optBool("wilds_town_spawns", true) and "ON" or "OFF"
+          local wilds = mod:find(WILDS_ID)
+          if wildsOwnsOwSprites(wilds) then return "N/A" end
+          return optBool("wilds_town_spawns", false) and "ON" or "OFF"
         end,
         step = function(g)
-          local on = not optBool("wilds_town_spawns", true)
+          local wilds = mod:find(WILDS_ID)
+          if wildsOwnsOwSprites(wilds) then return end
+          local on = not optBool("wilds_town_spawns", false)
           setOpt("wilds_town_spawns", on, g)
-          -- Re-init current map so the toggle applies without warping.
           pcall(function()
-            local wilds = mod:find(WILDS_ID)
             local logic = wilds and wilds.exports and wilds.exports.logic
             local ow = g and g.overworld
             if logic and ow and ow.map and type(logic.initializeForMap) == "function" then
@@ -1003,19 +1056,33 @@ return function(mod)
       {
         label = "REACHABLE ONLY",
         value = function()
-          return optBool("wilds_require_reachable", true) and "ON" or "OFF"
+          local wilds = mod:find(WILDS_ID)
+          if wildsOwnsOwSprites(wilds) then return "N/A" end
+          return optBool("wilds_require_reachable", false) and "ON" or "OFF"
         end,
         step = function(g)
-          local on = not optBool("wilds_require_reachable", true)
+          local wilds = mod:find(WILDS_ID)
+          if wildsOwnsOwSprites(wilds) then return end
+          local on = not optBool("wilds_require_reachable", false)
           setOpt("wilds_require_reachable", on, g)
           pcall(function()
-            local wilds = mod:find(WILDS_ID)
             local logic = wilds and wilds.exports and wilds.exports.logic
             local ow = g and g.overworld
             if logic and ow and ow.map and type(logic.initializeForMap) == "function" then
               logic:initializeForMap(ow.map.id, g)
             end
           end)
+        end,
+      },
+      {
+        label = "GRASS LIFT",
+        value = function()
+          return optBool("wilds_grass_lift", false) and "ON" or "OFF"
+        end,
+        step = function(g)
+          local on = not optBool("wilds_grass_lift", false)
+          setOpt("wilds_grass_lift", on, g)
+          pcall(refreshWildGrassLift, g)
         end,
       },
     }
@@ -1099,11 +1166,12 @@ return function(mod)
     return items
   end)
 
-  mod.exports.version = "1.0.2"
+  mod.exports.version = "1.0.17"
   mod.exports.liveFollowerCount = liveFollowerCount
   mod.exports.pokeReady = pokeReady
   mod.exports.ensureControlEngine = ensureControlEngine
   mod.exports.ensureWildsExtras = ensureWildsExtras
-  mod.log:info("FOLLOWERS_EX 1.0.2 — control engine + wilds extras for public deps")
+  mod.exports.getSpriteSet = getSpriteSet
+  mod.log:info("FOLLOWERS_EX 1.0.17 — grass lift default off; Yellow Pikachu/leader slots")
 end
 

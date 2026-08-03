@@ -116,6 +116,23 @@ return function(hostMod)
     return out
   end
 
+  local function wildsIsModern(wilds)
+    -- 0.5.7+ / 0.6.0: native follow-sprites + EnhancedWorldSprite. Our
+    -- initializeForMap / Surface.resolve inject breaks their spawn pipeline.
+    local render = wilds and wilds.exports and wilds.exports.render
+    if render and (type(render.attachEnhancedToEntity) == "function"
+                   or type(render.syncEntityAnimation) == "function") then
+      return true
+    end
+    local ver = tostring((wilds and wilds.version) or "")
+    local maj, min = ver:match("^(%d+)%.(%d+)")
+    maj, min = tonumber(maj), tonumber(min)
+    if maj and min and (maj > 0 or min >= 5) then
+      return true
+    end
+    return false
+  end
+
   local function install(wilds)
     if not wilds or not wilds.exports or not wilds.exports.logic then return false end
     local logic = wilds.exports.logic
@@ -123,6 +140,12 @@ return function(hostMod)
     -- Local Wilds 0.4.5+ already has town/reachable — don't double-wrap.
     if type(logic._tryTownSurface) == "function" then
       hostMod.log:info("WildsExtras: native town support present; skip")
+      return true
+    end
+    if wildsIsModern(wilds) then
+      hostMod.log:info("WildsExtras: Wilds %s owns spawn pipeline; skip town/reachable inject",
+        tostring(wilds.version or "?"))
+      logic._followersExWildsExtras = true
       return true
     end
 
@@ -190,7 +213,7 @@ return function(hostMod)
         if surfaceInfo and surfaceInfo.supported then
           return encDef, surfaceInfo, nil
         end
-        if not optBool("wilds_town_spawns", true) then
+        if not optBool("wilds_town_spawns", false) then
           return encDef, surfaceInfo, nil
         end
         local mapType = EncounterIndex.mapTypeOf(game, mapId)
@@ -246,7 +269,7 @@ return function(hostMod)
         local townSource
 
         -- Pre-seed town enc override so _encDef / Surface.resolve see a table.
-        if ow and ow.map and ow.map.id == mapId and optBool("wilds_town_spawns", true)
+        if ow and ow.map and ow.map.id == mapId and optBool("wilds_town_spawns", false)
            and type(bareEncDef) == "function" then
           local bare = bareEncDef(self, mapId, game)
           local bareInfo = Surface.resolve(game, ow.map, bare)
@@ -283,7 +306,7 @@ return function(hostMod)
           self.state.encounterSource = "town:" .. tostring(townSource)
         end
 
-        if result and optBool("wilds_require_reachable", true)
+        if result and optBool("wilds_require_reachable", false)
            and self.eligibleCache and #self.eligibleCache > 0 then
           if ow and ow.map and ow.player and self.surfaceInfo then
             local before = #self.eligibleCache

@@ -125,8 +125,15 @@ return function(hostMod, assetMod)
     end
   end
 
+  local ensureYellowLeaderLayout -- fwd (needs monIdentityKey)
+
   local function setLeaderParty(game, partyIndex)
     if not game or not game.save then return end
+    local mon = game.save.party and game.save.party[partyIndex]
+    if GameVersion.isYellow() and mon and ensureYellowLeaderLayout then
+      local idx = ensureYellowLeaderLayout(game, mon)
+      if type(idx) == "number" then partyIndex = idx end
+    end
     game.save.pokepcLeader = { source = "party", index = partyIndex }
     game.save.followerPartyIndex = partyIndex
     bustLeaderVisual(game)
@@ -160,6 +167,12 @@ return function(hostMod, assetMod)
     if idx and save.party and save.party[idx] then
       return save.party[idx], "party"
     end
+    -- Yellow default: slot 1 is companion Pikachu, slot 2 is the OW leader.
+    if GameVersion.isYellow() and save.party and save.party[1]
+       and save.party[1].species == "PIKACHU" and save.party[2]
+       and (save.party[2].hp or 0) > 0 then
+      return save.party[2], "party"
+    end
     for _, mon in ipairs(save.party or {}) do
       if (mon.hp or 0) > 0 then return mon, "party" end
     end
@@ -191,6 +204,62 @@ return function(hostMod, assetMod)
     }, "|")
   end
 
+  -- Yellow: party[1] = talkable Pikachu; chosen leader → party[2]
+  -- (unless leader IS that Pikachu → stays slot 1). Trainer + pokemon modes.
+  ensureYellowLeaderLayout = function(game, leaderMon)
+    if not GameVersion.isYellow() then return nil end
+    local save = game and game.save
+    local party = save and save.party
+    if not (party and leaderMon) then return nil end
+
+    local pikaIdx = nil
+    for i, mon in ipairs(party) do
+      if mon and mon.species == "PIKACHU" then
+        pikaIdx = i
+        break
+      end
+    end
+    if not pikaIdx then return nil end
+    local pika = party[pikaIdx]
+
+    local leadIdx = nil
+    for i, mon in ipairs(party) do
+      if mon == leaderMon then leadIdx = i; break end
+    end
+    if not leadIdx then
+      local want = monIdentityKey(leaderMon)
+      for i, mon in ipairs(party) do
+        if want and monIdentityKey(mon) == want then
+          leadIdx = i
+          break
+        end
+      end
+    end
+    if not leadIdx then return nil end
+    local lead = party[leadIdx]
+
+    if lead == pika then
+      if pikaIdx ~= 1 then
+        table.remove(party, pikaIdx)
+        table.insert(party, 1, pika)
+      end
+      return 1
+    end
+
+    local rest = {}
+    for _, mon in ipairs(party) do
+      if mon ~= pika and mon ~= lead then
+        rest[#rest + 1] = mon
+      end
+    end
+    local newParty = { pika, lead }
+    for i = 1, #rest do
+      newParty[#newParty + 1] = rest[i]
+    end
+    save.party = newParty
+    return 2
+  end
+
   local function leaderPartyIndex(game, leader, leadSrc)
     local save = game and game.save
     if not save then return nil end
@@ -209,6 +278,72 @@ return function(hostMod, assetMod)
     return nil
   end
 
+  local function partyPikachuIndex(save)
+    for i, mon in ipairs(save.party or {}) do
+      if mon and mon.species == "PIKACHU" and (mon.hp or 0) > 0 then
+        return i
+      end
+    end
+    return nil
+  end
+
+  -- Yellow trainer-walk: keep stock PikachuFollower (talkable). Pack trailers
+  -- are extra party mons only — never a second Pikachu clone.
+  local function yellowStockFollowActive(game)
+    if not GameVersion.isYellow() then return false end
+    if controlMode(game) ~= "follow" then return false end
+    local save = game and game.save
+    return partyPikachuIndex(save) ~= nil
+  end
+
+  local function findStockPikachu(ow)
+    for _, npc in ipairs((ow and ow.npcs) or {}) do
+      if npc and npc.pikachuFollower and not npc.pokepcTrailer then
+        return npc
+      end
+    end
+    return nil
+  end
+
+  -- VoxelMerge syncLiveFollowerDef paints stock SPRITE_PIKACHU as the leader.
+  -- On Yellow the talkable companion must always be real Pikachu (party slot 1).
+  local function forceYellowStockPikachuArt(ow)
+    if not GameVersion.isYellow() then return end
+    local npc = findStockPikachu(ow)
+    if not npc then return end
+    local path = assetRoot .. "/assets/sprites/follower_PIKACHU.png"
+    local def = npc.sprite and npc.sprite.def
+    if def and def.image == path and def.id == "SPRITE_PIKACHU" then
+      npc._pokepcFollowerSpecies = "PIKACHU"
+      return
+    end
+    local ok, sprite = pcall(SpriteRenderer.new, {
+      id = "SPRITE_PIKACHU",
+      image = path, frames = 6, walker = true, trueColor = true,
+    }, npc.id or "pikachu")
+    if ok and sprite then
+      npc.sprite = sprite
+      npc.spriteId = "SPRITE_PIKACHU"
+      npc._pokepcFollowerSpecies = "PIKACHU"
+    end
+  end
+
+  -- When stock Pika is on the field, pack trailers follow *it*, not the player
+  -- (otherwise trailer[1] and stock share the same cell).
+  local function trailAnchor(game, ow, player)
+    if yellowStockFollowActive(game) then
+      local stock = findStockPikachu(ow)
+      if stock then return stock end
+    end
+    return player
+  end
+
+  local function isYellowPikachuTrailer(npc)
+    return npc and npc.pokepcTrailer and npc.pokepcMon
+      and npc.pokepcMon.species == "PIKACHU"
+      and GameVersion.isYellow()
+  end
+
   local function partyTrailMons(game)
     -- Party mons that may trail (healthy). When the player IS the pokemon,
     -- never trail the controlled leader (by index / identity) — otherwise a
@@ -219,6 +354,7 @@ return function(hostMod, assetMod)
     local leadIdx = leaderPartyIndex(game, leader, leadSrc)
     local leadKey = monIdentityKey(leader)
     local front = isPokemonFront(game)
+    local skipPikaIdx = yellowStockFollowActive(game) and partyPikachuIndex(save) or nil
     local out = {}
     local function push(mon, i)
       out[#out + 1] = { mon = mon, partyIndex = i }
@@ -230,14 +366,19 @@ return function(hostMod, assetMod)
       if leadKey and monIdentityKey(mon) == leadKey then return true end
       return false
     end
+    local function skipAsStockPika(i)
+      return skipPikaIdx and i == skipPikaIdx
+    end
 
     if not front and leader then
       if leadIdx and save.party and save.party[leadIdx]
-         and (save.party[leadIdx].hp or 0) > 0 then
+         and (save.party[leadIdx].hp or 0) > 0
+         and not skipAsStockPika(leadIdx) then
         push(save.party[leadIdx], leadIdx)
       else
         for i, mon in ipairs(save.party or {}) do
-          if isControlledLeader(mon, i) and (mon.hp or 0) > 0 then
+          if isControlledLeader(mon, i) and (mon.hp or 0) > 0
+             and not skipAsStockPika(i) then
             push(mon, i)
             break
           end
@@ -245,7 +386,8 @@ return function(hostMod, assetMod)
       end
     end
     for i, mon in ipairs(save.party or {}) do
-      if (mon.hp or 0) > 0 and not isControlledLeader(mon, i) then
+      if (mon.hp or 0) > 0 and not isControlledLeader(mon, i)
+         and not skipAsStockPika(i) then
         push(mon, i)
       end
     end
@@ -265,15 +407,20 @@ return function(hostMod, assetMod)
   end)
 
   local followerImgCache = {}
+
   local function followerPath(species)
     return assetRoot .. "/assets/sprites/follower_"
       .. tostring(species or "CHARMANDER") .. ".png"
   end
 
-  -- Cache key includes shiny so one shiny mon cannot tint every trailer.
+  local function invalidateFollowerImageCache()
+    followerImgCache = {}
+  end
+
+  -- PokePC walker sheets only (16x96). No Wilds follow-sprite switching.
   local function getFollowerImage(species, shiny)
     species = species or "CHARMANDER"
-    local key = tostring(species) .. (shiny and "#S" or "#N")
+    local key = "pc:" .. tostring(species) .. (shiny and "#S" or "#N")
     if followerImgCache[key] then return followerImgCache[key] end
     local path = followerPath(species)
     local img
@@ -321,15 +468,19 @@ return function(hostMod, assetMod)
   local function restorePlayerTrainerSprite(game, ow)
     local player = ow and ow.player
     if not player or not game or not game.data then return end
-    if not player._pokepcAsPokemon then return end
+    local monSprite = player._pokepcAsPokemon
+      or (player.sprite and player.sprite.def
+          and player.sprite.def.id == "SPRITE_PLAYER_POKEMON")
+    if not monSprite then return end
     local def = trainerWalkDef(game)
     if not def then return end
     player.sprite = SpriteRenderer.new(def, "player")
     player._pokepcAsPokemon = nil
     player._pokepcControlSpecies = nil
+    player._pokepcShiny = nil
   end
 
-  local function applyPlayerAsPokemon(game, ow)
+  local function applyPlayerAsPokemon(game, ow, force)
     local player = ow and ow.player
     if not player then return end
     if player.surfing or player.onBike or player.fishing then
@@ -340,7 +491,7 @@ return function(hostMod, assetMod)
     local species = mon and mon.species or "CHARMANDER"
     local path = followerPath(species)
     local shiny = mon and Stats.isShiny and Stats.isShiny(mon.dvs)
-    if player._pokepcAsPokemon and player._pokepcControlSpecies == species
+    if not force and player._pokepcAsPokemon and player._pokepcControlSpecies == species
        and player._pokepcShiny == (shiny and true or false)
        and player.sprite and player.sprite.def
        and player.sprite.def.image == path then
@@ -359,9 +510,9 @@ return function(hostMod, assetMod)
     end
   end
 
-  local function syncPlayerControlVisual(game, ow)
+  local function syncPlayerControlVisual(game, ow, force)
     if isPokemonFront(game) then
-      applyPlayerAsPokemon(game, ow)
+      applyPlayerAsPokemon(game, ow, force)
     else
       restorePlayerTrainerSprite(game, ow)
     end
@@ -397,7 +548,14 @@ return function(hostMod, assetMod)
     npc.pokepcMon = mon
     npc.passable = true
     npc.facing = facing or "down"
+    -- NEVER set pikachuFollower on trailers. Stock PikachuFollower.findFollower
+    -- picks the first pikachuFollower and, when shouldSpawn is false (pokemon/
+    -- pack), remove()s it every frame — trailers look static / unwalkable.
     npc.pikachuFollower = false
+    -- Yellow talk-as-mon: custom flag only (interact wrap → TalkToPikachu).
+    npc.pokepcTalkablePikachu = (kind ~= "trainer"
+      and GameVersion.isYellow()
+      and mon and mon.species == "PIKACHU") and true or false
 
     if kind == "trainer" then
       -- Walk sheets are DMG greyscale; color comes from OBP / map bake.
@@ -441,7 +599,77 @@ return function(hostMod, assetMod)
     return dx * steps, dy * steps
   end
 
-  local function syncTrailers(game, ow)
+  local function walkableBehind(ow, px, py, facing, steps)
+    local ox, oy = behindOffset(facing, steps)
+    local bx, by = px + ox, py + oy
+    if ow.map:inBounds(bx, by) and ow.map:isWalkableCell(bx, by) then
+      return bx, by
+    end
+    bx, by = px, py
+    for s = steps, 1, -1 do
+      local sx, sy = behindOffset(facing, s)
+      local tx, ty = px + sx, py + sy
+      if ow.map:inBounds(tx, ty) and ow.map:isWalkableCell(tx, ty) then
+        return tx, ty
+      end
+    end
+    return bx, by
+  end
+
+  local function placeTrailerAt(npc, x, y, facing)
+    npc.cellX, npc.cellY = x, y
+    npc.px, npc.py = x * 16, y * 16
+    npc.targetX, npc.targetY = nil, nil
+    npc.moving = false
+    npc.progress = 0
+    npc.hopStep = nil
+    if facing then npc.facing = facing end
+  end
+
+  local function seedTrailBehind(ow, anchor, facing, n)
+    local goals = {}
+    local px = anchor.cellX or 0
+    local py = anchor.cellY or 0
+    facing = facing or anchor.facing or "down"
+    for i = 1, n do
+      local bx, by = walkableBehind(ow, px, py, facing, i)
+      goals[i] = { x = bx, y = by }
+    end
+    return goals
+  end
+
+  local function trailersAliveInWorld(ow, trailers)
+    if not trailers or #trailers == 0 then return true end
+    local ents = ow.entities or {}
+    for _, t in ipairs(trailers) do
+      local found = false
+      for _, e in ipairs(ents) do
+        if e == t then found = true; break end
+      end
+      if not found then return false end
+    end
+    return true
+  end
+
+  local function compositionDirty(trailers, want)
+    if #trailers ~= #want then return true end
+    for i, spec in ipairs(want) do
+      local t = trailers[i]
+      if not t or t.pokepcTrailerKind ~= spec.kind then return true end
+      if spec.kind == "mon" then
+        local sp = spec.mon and spec.mon.species
+        local cur = t.pokepcMon and t.pokepcMon.species
+        if sp ~= cur then return true end
+      end
+    end
+    return false
+  end
+
+  -- Deferred map-enter rebuild so trailer spawn does not stack with voxel/map init.
+  local pendingMapTrailerSync = false
+
+  local function syncTrailers(game, ow, opts)
+    opts = opts or {}
     if not ow or not ow.player or not ow.map then return end
     local mode = controlMode(game)
     local want = {}
@@ -466,49 +694,41 @@ return function(hostMod, assetMod)
     -- mode == "pokemon" and count 0: solo leader, no trailers
 
     local trailers = ow.pokepcTrailers or {}
-    local dirty = #trailers ~= #want
-    if not dirty then
-      for i, spec in ipairs(want) do
-        local t = trailers[i]
-        if not t or t.pokepcTrailerKind ~= spec.kind then dirty = true break end
-        if spec.kind == "mon" then
-          local sp = spec.mon and spec.mon.species
-          local cur = t.pokepcMon and t.pokepcMon.species
-          if sp ~= cur then dirty = true break end
-        end
-      end
-    end
+    local dirty = compositionDirty(trailers, want)
+      or not trailersAliveInWorld(ow, trailers)
 
     local p = ow.player
-    local facing = p.facing or "down"
+    local anchor = trailAnchor(game, ow, p)
+    local facing = (anchor and anchor.facing) or p.facing or "down"
+    local mapEnter = opts.mapEnter == true
+    -- Prefer player step clock (bike/walk); fall back to anchor.
+    local stepClock = p.stepFramesCur or p.stepFrames
+      or (anchor and (anchor.stepFramesCur or anchor.stepFrames)) or 16
+
+    -- Stock just appeared (or shared a cell with trailer[1]): reseed behind it.
+    if not dirty and yellowStockFollowActive(game) and anchor ~= p
+       and #trailers > 0 then
+      local t1 = trailers[1]
+      if t1 and not t1.moving
+         and t1.cellX == anchor.cellX and t1.cellY == anchor.cellY then
+        mapEnter = true
+      end
+    end
 
     if dirty then
       removeTrailers(ow)
       trailers = {}
-      local goals = {}
-      local px, py = p.cellX, p.cellY
+      local goals = seedTrailBehind(ow, anchor, facing, #want)
       for i, spec in ipairs(want) do
-        local ox, oy = behindOffset(facing, i)
-        local bx, by = px + ox, py + oy
-        if not (ow.map:inBounds(bx, by) and ow.map:isWalkableCell(bx, by)) then
-          -- Fall back toward the player until a walkable cell is found.
-          bx, by = px, py
-          for s = i, 1, -1 do
-            local sx, sy = behindOffset(facing, s)
-            local tx, ty = px + sx, py + sy
-            if ow.map:inBounds(tx, ty) and ow.map:isWalkableCell(tx, ty) then
-              bx, by = tx, ty
-              break
-            end
-          end
-        end
+        local cell = goals[i] or { x = anchor.cellX, y = anchor.cellY }
+        local bx, by = cell.x, cell.y
         local okNpc, npc = pcall(makeTrailer, game, ow, bx, by, facing,
                                       spec.kind, spec.mon, i)
         if not okNpc or not npc then
           print("[FOLLOWERS_EX] trailer spawn failed slot " .. tostring(i)
             .. ": " .. tostring(npc))
         else
-          npc.px, npc.py = bx * 16, by * 16
+          placeTrailerAt(npc, bx, by, facing)
           table.insert(ow.npcs, npc)
           table.insert(ow.entities, npc)
           local slot = #trailers + 1
@@ -518,17 +738,28 @@ return function(hostMod, assetMod)
       end
       ow.pokepcTrailers = trailers
       ow.pokepcTrailCells = goals
-      ow.pokepcTrailHead = { x = px, y = py }
+      ow.pokepcTrailHead = { x = anchor.cellX, y = anchor.cellY }
+    elseif mapEnter and #trailers > 0 then
+      -- Same pack composition: keep NPCs, soft-reset behind the trail anchor.
+      local goals = seedTrailBehind(ow, anchor, facing, #trailers)
+      for i, npc in ipairs(trailers) do
+        local g = goals[i] or { x = anchor.cellX, y = anchor.cellY }
+        placeTrailerAt(npc, g.x, g.y, facing)
+        if want[i] and want[i].kind == "mon" then
+          npc.pokepcMon = want[i].mon
+        end
+      end
+      ow.pokepcTrailCells = goals
+      ow.pokepcTrailHead = { x = anchor.cellX, y = anchor.cellY }
     end
 
-    -- Queue a trail beat when the player COMMITS a step (same as
-    -- PikachuFollower): head tracks the destination; each trailer shifts
-    -- into the cell the one ahead vacated.
-    local destX = p.targetX or p.cellX
-    local destY = p.targetY or p.cellY
-    ow.pokepcTrailHead = ow.pokepcTrailHead or { x = p.cellX, y = p.cellY }
+    -- Trail commits track the anchor (stock Pika when Yellow follow is active).
+    local destX = anchor.targetX or anchor.cellX
+    local destY = anchor.targetY or anchor.cellY
+    ow.pokepcTrailHead = ow.pokepcTrailHead or { x = anchor.cellX, y = anchor.cellY }
     local head = ow.pokepcTrailHead
-    if destX ~= head.x or destY ~= head.y then
+    local committed = (destX ~= head.x or destY ~= head.y)
+    if committed then
       local goals = ow.pokepcTrailCells or {}
       for i = #trailers, 2, -1 do
         local prev = goals[i - 1]
@@ -539,6 +770,14 @@ return function(hostMod, assetMod)
       end
       ow.pokepcTrailCells = goals
       head.x, head.y = destX, destY
+    elseif not mapEnter and not dirty then
+      -- Cheap idle: facing only.
+      for _, npc in ipairs(trailers) do
+        if not npc.moving then
+          npc.facing = facing or npc.facing
+        end
+      end
+      return
     end
 
     local goals = ow.pokepcTrailCells or {}
@@ -546,14 +785,13 @@ return function(hostMod, assetMod)
       if npc.moving then
         -- NPC:update owns px/py mid-step; do not overwrite.
       else
-        local cell = goals[i] or { x = p.cellX, y = p.cellY }
+        local cell = goals[i] or { x = anchor.cellX, y = anchor.cellY }
         local gx, gy = cell.x, cell.y
         if npc.cellX ~= gx or npc.cellY ~= gy then
           local far = math.abs((npc.cellX or 0) - gx) + math.abs((npc.cellY or 0) - gy)
+          -- Never snap for 1–2 tiles; only warp-distance teleports.
           if far > 6 then
-            npc.cellX, npc.cellY = gx, gy
-            npc.px, npc.py = gx * 16, gy * 16
-            npc.targetX, npc.targetY = nil, nil
+            placeTrailerAt(npc, gx, gy, facing or npc.facing)
           else
             local dir
             if npc.cellX < gx then dir = "right"
@@ -563,19 +801,22 @@ return function(hostMod, assetMod)
             npc.facing = dir
             npc.targetX = npc.cellX + (dir == "right" and 1 or dir == "left" and -1 or 0)
             npc.targetY = npc.cellY + (dir == "down" and 1 or dir == "up" and -1 or 0)
-            local stepLen = p.stepFramesCur or p.stepFrames or 16
-            if far > 1 then
+            -- Match stock PikachuFollower step clock (incl. FastPikachuFollow).
+            local stepLen = stepClock
+            if far > 1 and not npc.hopStep then
               stepLen = math.max(1, math.floor(stepLen / 2))
             end
             npc.stepFrames = stepLen
             npc.moving = true
             npc.progress = 0
-            -- Same catch-up as PikachuFollower: this frame's npc:update
-            -- already ran, so burn the first step frame now.
-            if npc.update then npc:update(ow.map, ow.entities) end
+            -- Catch-up only when driven from PikachuFollower.update (after
+            -- the entity loop). Never from world.stepped.
+            if opts.catchUp and npc.update then
+              npc:update(ow.map, ow.entities)
+            end
           end
         else
-          npc.facing = p.facing or npc.facing
+          npc.facing = facing or npc.facing
         end
       end
     end
@@ -616,7 +857,8 @@ return function(hostMod, assetMod)
     if not ow then return end
     for i = #(ow.npcs or {}), 1, -1 do
       local npc = ow.npcs[i]
-      if npc and npc.pikachuFollower then
+      -- Never strip pack trailers (even if marked talkable).
+      if npc and npc.pikachuFollower and not npc.pokepcTrailer then
         table.remove(ow.npcs, i)
         for j, e in ipairs(ow.entities or {}) do
           if e == npc then table.remove(ow.entities, j); break end
@@ -633,7 +875,11 @@ return function(hostMod, assetMod)
     if mode == "pokemon" or mode == "lead_trainer" or mode == "pack" then
       return false
     end
-    if mode == "follow" and followerCount(game) > 0 then
+    -- Non-Yellow follow + pack: trailers own the field (stock would duplicate
+    -- via starterInParty override). Yellow follow keeps stock Pikachu for talk;
+    -- trailers exclude that party Pikachu so there is no clone.
+    if mode == "follow" and followerCount(game) > 0
+       and not yellowStockFollowActive(game) then
       return false
     end
     if type(prevShouldSpawn) == "function" then
@@ -649,8 +895,14 @@ return function(hostMod, assetMod)
   PikachuFollower.update = function(game, ow, ...)
     local result = origFollowerUpdate(game, ow, ...)
     if isPokemonFront(game) then pcall(removeStockPikachu, ow) end
+    pcall(forceYellowStockPikachuArt, ow)
     pcall(syncPlayerControlVisual, game, ow)
-    pcall(syncTrailers, game, ow)
+    if pendingMapTrailerSync then
+      pendingMapTrailerSync = false
+      pcall(syncTrailers, game, ow, { mapEnter = true, catchUp = true })
+    else
+      pcall(syncTrailers, game, ow, { catchUp = true })
+    end
     return result
   end
 
@@ -658,13 +910,18 @@ return function(hostMod, assetMod)
   PikachuFollower.onMapEntered = function(game, ow, opts)
     origOnMap(game, ow, opts)
     local mode = controlMode(game)
-    if mode == "pokemon" or mode == "lead_trainer" or mode == "pack"
-       or (mode == "follow" and followerCount(game) > 0) then
+    -- Only strip stock when player-is-pokemon / pack owns the field.
+    -- Yellow follow keeps stock PikachuFollower for talk.
+    if mode == "pokemon" or mode == "lead_trainer" or mode == "pack" then
       pcall(removeStockPikachu, ow)
-      pcall(removeTrailers, ow)
+    else
+      pcall(forceYellowStockPikachuArt, ow)
     end
+    -- Soft-reset / rebuild on the next follower update (avoids stacking with
+    -- map/voxel init). Do not tear down trailers here unless composition will
+    -- change — syncTrailers reuses NPCs when the pack set matches.
+    pendingMapTrailerSync = true
     pcall(syncPlayerControlVisual, game, ow)
-    pcall(syncTrailers, game, ow)
   end
 
   -- Pull FOLLOWERS_EX option values into save so stuck pokepcFollowerCount=0
@@ -685,34 +942,92 @@ return function(hostMod, assetMod)
   mod.events:on("map.entered", function()
     local game, ow = Game, Game and Game.overworld
     pcall(syncPlayerControlVisual, game, ow)
-    pcall(syncTrailers, game, ow)
+    pendingMapTrailerSync = true
   end)
   mod.events:on("game.ready", function()
     alignSaveFromOptions(Game)
     pcall(syncPlayerControlVisual, Game, Game and Game.overworld)
-    pcall(syncTrailers, Game, Game and Game.overworld)
+    pendingMapTrailerSync = true
   end)
-  mod.events:on("world.stepped", function()
-    pcall(syncTrailers, Game, Game and Game.overworld)
-  end)
+  -- Trailer movement runs from PikachuFollower.update only (not world.stepped)
+  -- so steps are not double-advanced against the NPC update loop.
+
+  -- Yellow pokemon/pack: stock follower suppressed; party Pikachu trailer uses
+  -- pokepcTalkablePikachu (never pikachuFollower). Re-seat on game.ready only.
+  local function installTalkWrap()
+    local OverworldState = require("src.world.OverworldController")
+    if not (OverworldState and OverworldState.interact) then return end
+    if OverworldState._followersExTalkWrap == OverworldState.interact then return end
+    local origInteract = OverworldState.interact
+    local function talkWrap(self, ...)
+      local p = self.player
+      if p and GameVersion.isYellow() then
+        local Collision = require("src.world.Collision")
+        local fx, fy = p:facingCell()
+        local npc = self:npcAtCell(fx, fy)
+        if not npc and self.map and self.map:isCounterCell(fx, fy) then
+          local fx2, fy2 = Collision.target(fx, fy, p.facing)
+          npc = self:npcAtCell(fx2, fy2)
+        end
+        if npc and npc.pokepcTrailer and (npc.pokepcTalkablePikachu
+            or isYellowPikachuTrailer(npc)) then
+          PikachuFollower.talk(Game, self, npc)
+          return
+        end
+      end
+      return origInteract(self, ...)
+    end
+    OverworldState.interact = talkWrap
+    OverworldState._followersExTalkWrap = talkWrap
+  end
+  installTalkWrap()
+  mod.events:on("game.ready", installTalkWrap)
 
   -- ------- Resolve / draw (pokemon followers only — trainer uses engine OBP)
+  local function monSpeciesShinyFromDef(self)
+    local id = self.def and self.def.id
+    local species = self.def and self.def.image
+      and self.def.image:match("follower_([%w_]+)%.png")
+    local shiny = self.def and self.def.pokepcShiny
+    -- Stock companion sprite is always Pikachu art (never the OW leader).
+    if id == "SPRITE_PIKACHU" then
+      species = "PIKACHU"
+      if GameVersion.isYellow() then
+        local save = Game and Game.save
+        local pika = save and save.party and save.party[partyPikachuIndex(save) or 1]
+        if pika and Stats.isShiny then
+          shiny = Stats.isShiny(pika.dvs) and true or false
+        end
+      end
+    elseif not species then
+      local mon = getLeaderMon(Game)
+      species = mon and mon.species or "CHARMANDER"
+      if shiny == nil and mon and Stats.isShiny then
+        shiny = Stats.isShiny(mon.dvs)
+      end
+    end
+    return species, shiny
+  end
+
   local origResolveImage = SpriteRenderer.resolveImage
   SpriteRenderer.resolveImage = function(self, ...)
     local id = self.def and self.def.id
     if id == "SPRITE_POKEPC_MON" or id == "SPRITE_PLAYER_POKEMON"
        or id == "SPRITE_PIKACHU" then
-      local species = self.def.image
-        and self.def.image:match("follower_([%w_]+)%.png")
-      local shiny = self.def and self.def.pokepcShiny
-      if not species then
-        local mon = getLeaderMon(Game)
-        species = mon and mon.species or "CHARMANDER"
-        if shiny == nil and mon and Stats.isShiny then
-          shiny = Stats.isShiny(mon.dvs)
-        end
+      local species, shiny = monSpeciesShinyFromDef(self)
+      -- Hard-lock stock companion to Pikachu so VoxelMerge cannot retarget it.
+      if id == "SPRITE_PIKACHU" then species = "PIKACHU" end
+      local path = followerPath(species)
+      local img = getFollowerImage(species, shiny)
+      -- Billboard mesh UVs come from Assets.image(def.image) — keep in sync.
+      if self.def and type(path) == "string" then
+        self.def.image = path
+        self.def.frames = 6
+        self.def.walker = true
+        self.def.trueColor = true
       end
-      return getFollowerImage(species, shiny)
+      if img then self.image = img end
+      return img
     end
     return origResolveImage(self, ...)
   end
@@ -725,44 +1040,59 @@ return function(hostMod, assetMod)
     end
   end
 
+  -- trueColor path: immediate draw + markTrueColor (same as stock SpriteRenderer).
+  -- markSpriteRedraw-only was meant for OBP greys and looks scrambled under
+  -- Dramatic Shape / zone shader when used with PokePC sheets.
+  local function blitPokepcTrueColor(img, frameIdx, x, y, flip)
+    if not (img and love and love.graphics) then return false end
+    local iw, ih = img:getDimensions()
+    local quad = love.graphics.newQuad(0, (frameIdx or 0) * 16, 16, 16, iw, ih)
+    local drawX = flip and (x + 16) or x
+    local sx = flip and -1 or 1
+    if PaletteFX.markTrueColor then
+      PaletteFX.markTrueColor(x, y, 16, 16)
+    end
+    love.graphics.setColor(1, 1, 1, 1)
+    love.graphics.draw(img, quad, drawX, y, 0, sx, 1)
+    return true
+  end
+
   local origSpriteDraw = SpriteRenderer.draw
-  function SpriteRenderer:draw(px, py, camX, camY, facing, walkPhase, stepFlip)
+  function SpriteRenderer:draw(px, py, camX, camY, facing, walkPhase, stepFlip, topHalf)
     local id = self.def and self.def.id
     if id == "SPRITE_POKEPC_MON" or id == "SPRITE_PLAYER_POKEMON"
         or id == "SPRITE_PIKACHU" then
-      local species = self.def.image
-        and self.def.image:match("follower_([%w_]+)%.png")
-      local shiny = self.def and self.def.pokepcShiny
-      if not species then
-        local mon = getLeaderMon(Game)
-        species = mon and mon.species or "CHARMANDER"
-        if shiny == nil and mon and Stats.isShiny then
-          shiny = Stats.isShiny(mon.dvs)
-        end
-      end
+      local species, shiny = monSpeciesShinyFromDef(self)
       local img = getFollowerImage(species, shiny)
       if img then
         local x = math.floor(px - camX)
         local y = math.floor(py - camY) - 4
         local STAND, WALK = SpriteRenderer.STAND, SpriteRenderer.WALK
         local dirMap = (walkPhase == 1) and WALK or STAND
-        local frameIdx = dirMap[facing] or 0
-        local quad = self.frames[frameIdx]
+        local frameIdx = dirMap[facing or "down"] or 0
         local flip = (facing == "right")
           or (stepFlip and (facing == "up" or facing == "down"))
-        PaletteFX.markSpriteRedraw(img, quad, flip and (x + 16) or x, y,
-          flip and -1 or 1, nil, false)
-        if shiny then
-          local key
-          if id == "SPRITE_POKEPC_MON" then
-            key = "trailer:" .. tostring(self.id or species)
-          else
-            key = "follower:" .. tostring(species)
-          end
-          drawTrailerSparkles(key, x + 8, y + 4, 11)
+        if topHalf then
+          -- Fishing / half-blit: defer to stock with our resolved image.
+          self.image = img
+          return origSpriteDraw(self, px, py, camX, camY, facing, walkPhase,
+                                stepFlip, topHalf)
         end
-        return
+        if blitPokepcTrueColor(img, frameIdx, x, y, flip) then
+          if shiny then
+            local key = (id == "SPRITE_POKEPC_MON")
+              and ("trailer:" .. tostring(self.id or species))
+              or ("follower:" .. tostring(species))
+            -- No-op when ShinyPokemon's draw wrap already sparkled (outer).
+            drawTrailerSparkles(key, x + 8, y + 4, 11)
+          end
+          return
+        end
       end
+    end
+    if topHalf ~= nil then
+      return origSpriteDraw(self, px, py, camX, camY, facing, walkPhase,
+                            stepFlip, topHalf)
     end
     return origSpriteDraw(self, px, py, camX, camY, facing, walkPhase, stepFlip)
   end
@@ -841,9 +1171,31 @@ return function(hostMod, assetMod)
     syncPlayerControlVisual = syncPlayerControlVisual,
     syncTrailers = syncTrailers,
     alignSaveFromOptions = alignSaveFromOptions,
+    invalidateFollowerImageCache = invalidateFollowerImageCache,
     syncAll = function(game, ow)
-      pcall(syncPlayerControlVisual, game, ow)
-      pcall(syncTrailers, game, ow)
+      invalidateFollowerImageCache()
+      if ow then pcall(removeTrailers, ow) end
+      -- Yellow: keep party[1]=Pikachu / leader at party[2] after menu changes.
+      if GameVersion.isYellow() and game and game.save
+         and game.save.pokepcLeader and game.save.pokepcLeader.source == "party" then
+        local mon = game.save.party
+          and game.save.party[game.save.pokepcLeader.index]
+        if mon then
+          local idx = ensureYellowLeaderLayout(game, mon)
+          if type(idx) == "number" then
+            game.save.pokepcLeader.index = idx
+            game.save.followerPartyIndex = idx
+          end
+        end
+      end
+      -- Do NOT clear _pokepcAsPokemon before restore — restore needs it
+      -- (or SPRITE_PLAYER_POKEMON id). Clearing first left you stuck as a mon.
+      if isPokemonFront(game) and ow and ow.player then
+        ow.player._pokepcControlSpecies = nil -- force pokemon sprite rebuild
+      end
+      pcall(syncPlayerControlVisual, game, ow, true)
+      pcall(forceYellowStockPikachuArt, ow)
+      pcall(syncTrailers, game, ow, { mapEnter = true, catchUp = true })
     end,
     _followersExControlEngine = true,
   }
